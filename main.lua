@@ -1,6 +1,8 @@
--- CAMAR UNIVERSAL FPS (v2 — crash-fixed)
+-- CAMAR UNIVERSAL FPS (v4)
 -- language: Luau | target: Roblox client via executor
--- fixes: __index recursion, __namecall recursion, remote-destroy loop, wallhack throttling
+-- v4 fixes: window drag (title.Active), minimize button, slider MouseButton1Down+GetMouseLocation,
+--           wallhack skips character parts, Hooks toggle honesto em runtime, AutoHeal via Tool:Activate,
+--           local load -> loadBtn, cleanup on re-execute
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -10,18 +12,21 @@ local HttpService       = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
+local getgenv           = getgenv or function() return _G end
 local hookmetamethod    = hookmetamethod
 local checkcaller       = checkcaller or function() return false end
 local getnamecallmethod = getnamecallmethod
 local writefile, readfile, isfile = writefile, readfile, isfile
-local Drawing           = Drawing or error("Drawing required")
+local Drawing           = Drawing or error("Drawing required (Synapse/Fluxus/Delta/Wave)")
+
+if getgenv().CAMAR_FPS_CLEANUP then pcall(getgenv().CAMAR_FPS_CLEANUP) end
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- CONFIG
 -- ═════════════════════════════════════════════════════════════════════════════
 local Config = {
     Aimbot   = { Enabled=false, Key="MouseButton2", Smooth=0.18, FOV=140, WallCheck=true, TeamCheck=true, ShowFOV=true },
-    ESP      = { Enabled=false, Boxes=true, Names=true, Health=true, Distance=true, Chams=false, TeamColor=true, BoxColor=Color3.fromRGB(255,90,20) },
+    ESP      = { Enabled=false, Boxes=true, Names=true, Health=true, Distance=true, Chams=false, TeamColor=true, Wallhack=false, BoxColor=Color3.fromRGB(255,90,20) },
     Combat   = { NoRecoil=false, NoSpread=false, RapidFire=false, RapidFireMult=2, Hooks=true },
     Movement = { Speed=16, Jump=50, Fly=false, FlySpeed=60, Noclip=false },
     Misc     = { Fullbright=false, RemoveEffects=false, AutoReload=false, AutoHeal=false },
@@ -56,21 +61,28 @@ end
 loadConfig()
 
 -- ═════════════════════════════════════════════════════════════════════════════
+-- CLEANUP TRACKING
+-- ═════════════════════════════════════════════════════════════════════════════
+local connections, drawingObjects = {}, {}
+local function track(c) table.insert(connections, c); return c end
+local function trackDraw(d) table.insert(drawingObjects, d); return d end
+
+-- ═════════════════════════════════════════════════════════════════════════════
 -- DRAWING
 -- ═════════════════════════════════════════════════════════════════════════════
-local fovCircle = Drawing.new("Circle")
+local fovCircle = trackDraw(Drawing.new("Circle"))
 fovCircle.Thickness = 1.5
 fovCircle.Filled    = false
 fovCircle.Color     = Color3.fromRGB(255, 90, 20)
 fovCircle.Visible   = false
 
 local function newText(size)
-    local t = Drawing.new("Text")
-    t.Size    = size or 14
-    t.Center  = true
-    t.Outline = true
-    t.Color   = Color3.new(1, 1, 1)
+    local t = trackDraw(Drawing.new("Text"))
+    t.Size = size or 14
+    t.Center = true
+    t.Color = Color3.new(1, 1, 1)
     t.Visible = false
+    pcall(function() t.Outline = true end)
     return t
 end
 
@@ -81,7 +93,7 @@ local espObjects = {}
 
 local function createESP(plr)
     if espObjects[plr] then return end
-    local ok, box = pcall(function() return Drawing.new("Square") end)
+    local ok, box = pcall(function() return trackDraw(Drawing.new("Square")) end)
     if not ok or not box then return end
     box.Thickness = 1
     box.Filled    = false
@@ -114,11 +126,12 @@ local function updateESP()
         return
     end
     local cam = workspace.CurrentCamera
+    if not cam then return end
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer then continue end
         if not espObjects[plr] then createESP(plr) end
         local o = espObjects[plr]
-        if not o then continue end
+        if not o or not o.box then continue end
 
         local char = plr.Character
         local hrp  = char and char:FindFirstChild("HumanoidRootPart")
@@ -127,7 +140,7 @@ local function updateESP()
 
         if not (hrp and head and hum and hum.Health > 0) then
             o.box.Visible, o.name.Visible, o.health.Visible, o.distance.Visible = false, false, false, false
-            o.highlight.Enabled = false
+            pcall(function() o.highlight.Enabled = false end)
             continue
         end
 
@@ -135,16 +148,18 @@ local function updateESP()
         local baseColor = Config.ESP.TeamColor and teamColor or Config.ESP.BoxColor
 
         if Config.ESP.Chams then
-            if o.highlight.Parent ~= char then o.highlight.Parent = char end
-            o.highlight.Enabled      = true
-            o.highlight.FillColor    = baseColor
-            o.highlight.OutlineColor = Color3.new(1, 1, 1)
+            if o.highlight.Parent ~= char then pcall(function() o.highlight.Parent = char end) end
+            pcall(function() o.highlight.Enabled = true end)
+            pcall(function()
+                o.highlight.FillColor = baseColor
+                o.highlight.OutlineColor = Color3.new(1, 1, 1)
+            end)
         else
-            o.highlight.Enabled = false
+            pcall(function() o.highlight.Enabled = false end)
         end
 
-        local top    = head.Position + Vector3.new(0, 0.5, 0)
-        local bottom = hrp.Position  - Vector3.new(0, 2.6, 0)
+        local top = head.Position + Vector3.new(0, 0.5, 0)
+        local bottom = hrp.Position - Vector3.new(0, 2.6, 0)
         local topPos, topOn = cam:WorldToViewportPoint(top)
         local botPos, botOn = cam:WorldToViewportPoint(bottom)
 
@@ -180,21 +195,31 @@ local function updateESP()
     end
 end
 
--- wallhack throttled — refresh every 2s
+-- wallhack — pula partes de personagem
 local wallhackParts, lastWallhack = {}, 0
+local function isCharPart(part)
+    local cur = part.Parent
+    for _ = 1, 6 do
+        if not cur then return false end
+        if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return true end
+        cur = cur.Parent
+    end
+    return false
+end
 local function updateWallhack()
-    if not Config.ESP.Enabled then return end
+    if not Config.ESP.Wallhack then return end
     if tick() - lastWallhack < 2 then
-        for _, part in ipairs(wallhackParts) do
-            if part.Parent then pcall(function() part.LocalTransparencyModifier = 0.55 end) end
+        for part in pairs(wallhackParts) do
+            if part.Parent then pcall(function() part.LocalTransparencyModifier = 0.55 end)
+            else wallhackParts[part] = nil end
         end
         return
     end
     lastWallhack = tick()
     wallhackParts = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Transparency < 1 then
-            table.insert(wallhackParts, obj)
+        if obj:IsA("BasePart") and obj.Transparency < 1 and not isCharPart(obj) then
+            wallhackParts[obj] = true
             pcall(function() obj.LocalTransparencyModifier = 0.55 end)
         end
     end
@@ -255,8 +280,8 @@ local function applyMovement()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if hum then
         if hum.WalkSpeed ~= Config.Movement.Speed then hum.WalkSpeed = Config.Movement.Speed end
+        if hum.UseJumpPower ~= true then hum.UseJumpPower = true end
         if hum.JumpPower ~= Config.Movement.Jump then hum.JumpPower = Config.Movement.Jump end
-        hum.UseJumpPower = true
     end
 end
 local function updateFly()
@@ -335,7 +360,7 @@ end
 local function autoHeal()
     if not Config.Misc.AutoHeal then return end
     local char = LocalPlayer.Character
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not (hum and hum.Health < hum.MaxHealth) then return end
     local bp = LocalPlayer:FindFirstChild("Backpack")
     if not bp then return end
@@ -343,6 +368,7 @@ local function autoHeal()
         if tool:IsA("Tool") and (tool.Name:lower():find("heal") or tool.Name:lower():find("med")) then
             pcall(function() tool.Parent = char end)
             task.wait(0.1)
+            pcall(function() tool:Activate() end)
             return
         end
     end
@@ -363,27 +389,28 @@ local function spectate(name)
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- HOOKS — recursion-safe
+-- HOOKS — instala sempre (se disponível), checa toggle em runtime
 -- ═════════════════════════════════════════════════════════════════════════════
 local RECOIL = { Recoil=true, CameraRecoil=true, RecoilCamera=true, Kickback=true }
 local SPREAD = { Spread=true, BulletSpread=true, Dispersion=true }
 
 local oldIndex, oldNamecall
 
-if Config.Combat.Hooks and hookmetamethod and getnamecallmethod then
-    -- __index — só toca self via oldIndex, só em chave de recuo/spread
+if hookmetamethod and getnamecallmethod then
+    -- __index
     local okIdx, resIdx = pcall(function()
         return hookmetamethod(game, "__index", function(self, key)
-            if not checkcaller() then
-                local wantZero = false
-                if RECOIL[key] and Config.Combat.NoRecoil then wantZero = true
-                elseif SPREAD[key] and Config.Combat.NoSpread then wantZero = true end
-                if wantZero then
-                    local ok, nm = pcall(oldIndex, self, "Name")
-                    if ok and type(nm) == "string" then
-                        local l = nm:lower()
-                        if l:find("weapon") or l:find("gun") or l:find("recoil") or l:find("spread") then
-                            return 0
+            if not checkcaller() and Config.Combat.Hooks then
+                if type(key) == "string" and (RECOIL[key] or SPREAD[key]) then
+                    local wantR = RECOIL[key] and Config.Combat.NoRecoil
+                    local wantS = SPREAD[key] and Config.Combat.NoSpread
+                    if wantR or wantS then
+                        local okN, nm = pcall(oldIndex, self, "Name")
+                        if okN and type(nm) == "string" then
+                            local l = nm:lower()
+                            if l:find("weapon") or l:find("gun") or l:find("recoil") or l:find("spread") then
+                                return 0
+                            end
                         end
                     end
                 end
@@ -393,18 +420,18 @@ if Config.Combat.Hooks and hookmetamethod and getnamecallmethod then
     end)
     if okIdx then oldIndex = resIdx end
 
-    -- __namecall — só toca self via oldIndex
+    -- __namecall
     local okNc, resNc = pcall(function()
         return hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if not checkcaller() then
+            if not checkcaller() and Config.Combat.Hooks then
+                local method = getnamecallmethod()
                 if method == "Kick" and self == LocalPlayer then
                     return nil
                 end
-                if method == "FireServer" and Config.Combat.RapidFire and oldIndex then
-                    local okC, cls = pcall(oldIndex, self, "ClassName")
+                if method == "FireServer" and Config.Combat.RapidFire then
+                    local okC, cls = pcall(function() return self.ClassName end)
                     if okC and cls == "RemoteEvent" then
-                        local okN, nm = pcall(oldIndex, self, "Name")
+                        local okN, nm = pcall(function() return self.Name end)
                         if okN and type(nm) == "string" then
                             local l = nm:lower()
                             if l:find("fire") or l:find("shoot") or l:find("attack") or l:find("weapon") then
@@ -427,10 +454,14 @@ end
 -- GUI
 -- ═════════════════════════════════════════════════════════════════════════════
 local function buildGUI()
+    local old = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("CamarFPS")
+    if old then old:Destroy() end
+
     local sg = Instance.new("ScreenGui")
     sg.Name = "CamarFPS"
     sg.ResetOnSpawn = false
     sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.IgnoreGuiInset = false
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
     local main = Instance.new("Frame")
@@ -446,11 +477,12 @@ local function buildGUI()
     title.Size = UDim2.new(1, 0, 0, 32)
     title.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
     title.BorderSizePixel = 0
+    title.Active = true
     title.Parent = main
     Instance.new("UICorner", title).CornerRadius = UDim.new(0, 6)
 
     local tText = Instance.new("TextLabel")
-    tText.Size = UDim2.new(1, -50, 1, 0)
+    tText.Size = UDim2.new(1, -95, 1, 0)
     tText.Position = UDim2.new(0, 12, 0, 0)
     tText.BackgroundTransparency = 1
     tText.Text = "CAMAR · FPS"
@@ -460,6 +492,20 @@ local function buildGUI()
     tText.TextSize = 14
     tText.Parent = title
 
+    -- minimize button
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 24, 0, 24)
+    minBtn.Position = UDim2.new(1, -58, 0, 4)
+    minBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+    minBtn.Text = "–"
+    minBtn.TextColor3 = Color3.new(1, 1, 1)
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.TextSize = 16
+    minBtn.BorderSizePixel = 0
+    minBtn.Parent = title
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+
+    -- close button
     local close = Instance.new("TextButton")
     close.Size = UDim2.new(0, 24, 0, 24)
     close.Position = UDim2.new(1, -30, 0, 4)
@@ -513,6 +559,7 @@ local function buildGUI()
         page.ScrollBarThickness = 4
         page.CanvasSize = UDim2.new(0, 0, 0, 0)
         page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        page.ScrollingDirection = Enum.ScrollingDirection.Y
         page.Parent = content
         Instance.new("UIListLayout", page).Padding = UDim.new(0, 6)
 
@@ -585,39 +632,49 @@ local function buildGUI()
         lbl.Parent = row
 
         local bar = Instance.new("TextButton")
-        bar.Size = UDim2.new(1, -20, 0, 8)
-        bar.Position = UDim2.new(0, 10, 1, -14)
+        bar.Size = UDim2.new(1, -20, 0, 10)
+        bar.Position = UDim2.new(0, 10, 1, -16)
         bar.BackgroundColor3 = Color3.fromRGB(60, 60, 68)
         bar.Text = ""
+        bar.AutoButtonColor = false
         bar.BorderSizePixel = 0
         bar.Parent = row
         Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
 
         local fill = Instance.new("Frame")
-        fill.Size = UDim2.new((tbl[key] - mn) / (mx - mn), 0, 1, 0)
+        local startRel = math.clamp((tbl[key] - mn) / (mx - mn), 0, 1)
+        fill.Size = UDim2.new(startRel, 0, 1, 0)
         fill.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
         fill.BorderSizePixel = 0
         fill.Parent = bar
         Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
 
-        local dragging = false
-        local function setFromX(x)
-            local rel = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        local sliderDrag = false
+        local function setFromMouse()
+            local mouseX = UserInputService:GetMouseLocation().X
+            local rel = math.clamp((mouseX - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
             local val = mn + (mx - mn) * rel
             if isInt then val = math.floor(val + 0.5) end
             tbl[key] = val
             fill.Size = UDim2.new(rel, 0, 1, 0)
             lbl.Text = label .. "  (" .. tostring(val) .. ")"
         end
-        bar.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; setFromX(input.Position.X) end
+
+        bar.MouseButton1Down:Connect(function()
+            sliderDrag = true
+            setFromMouse()
         end)
-        UserInputService.InputChanged:Connect(function(input)
-            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then setFromX(input.Position.X) end
-        end)
-        UserInputService.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false; saveConfig() end
-        end)
+        track(UserInputService.InputChanged:Connect(function(input)
+            if sliderDrag and input.UserInputType == Enum.UserInputType.MouseMovement then
+                setFromMouse()
+            end
+        end))
+        track(UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                if sliderDrag then saveConfig() end
+                sliderDrag = false
+            end
+        end))
     end
 
     local aim = newTab("Aimbot")
@@ -636,12 +693,13 @@ local function buildGUI()
     makeToggle(esp, "Distance",   Config.ESP, "Distance")
     makeToggle(esp, "Chams",      Config.ESP, "Chams")
     makeToggle(esp, "Team Color", Config.ESP, "TeamColor")
+    makeToggle(esp, "Wallhack",   Config.ESP, "Wallhack")
 
     local combat = newTab("Combat")
+    makeToggle(combat, "Hooks On",   Config.Combat, "Hooks")
     makeToggle(combat, "No Recoil",  Config.Combat, "NoRecoil")
     makeToggle(combat, "No Spread",  Config.Combat, "NoSpread")
     makeToggle(combat, "Rapid Fire", Config.Combat, "RapidFire")
-    makeToggle(combat, "Hooks On",   Config.Combat, "Hooks")
     makeSlider(combat, "Rapid Mult", Config.Combat, "RapidFireMult", 1, 10, true)
 
     local mv = newTab("Movement")
@@ -680,59 +738,84 @@ local function buildGUI()
         if specBox.Text ~= "" then spectate(specBox.Text) end
     end)
 
-    local save = Instance.new("TextButton")
-    save.Size = UDim2.new(1, -10, 0, 28)
-    save.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
-    save.Text = "Save Config"
-    save.TextColor3 = Color3.new(1, 1, 1)
-    save.Font = Enum.Font.Gotham
-    save.TextSize = 12
-    save.BorderSizePixel = 0
-    save.Parent = misc
-    Instance.new("UICorner", save).CornerRadius = UDim.new(0, 4)
-    save.MouseButton1Click:Connect(saveConfig)
+    local saveBtn = Instance.new("TextButton")
+    saveBtn.Size = UDim2.new(1, -10, 0, 28)
+    saveBtn.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
+    saveBtn.Text = "Save Config"
+    saveBtn.TextColor3 = Color3.new(1, 1, 1)
+    saveBtn.Font = Enum.Font.Gotham
+    saveBtn.TextSize = 12
+    saveBtn.BorderSizePixel = 0
+    saveBtn.Parent = misc
+    Instance.new("UICorner", saveBtn).CornerRadius = UDim.new(0, 4)
+    saveBtn.MouseButton1Click:Connect(saveConfig)
 
-    local load = save:Clone()
-    load.BackgroundColor3 = Color3.fromRGB(60, 60, 68)
-    load.Text = "Load Config"
-    load.Parent = misc
-    load.MouseButton1Click:Connect(loadConfig)
+    local loadBtn = saveBtn:Clone()
+    loadBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 68)
+    loadBtn.Text = "Load Config"
+    loadBtn.Parent = misc
+    loadBtn.MouseButton1Click:Connect(function()
+        loadConfig()
+        applyFullbright()
+    end)
 
     selectTab("Aimbot")
 
-    local dragging, dragStart, startPos
+    -- window drag — title.Active = true garante captura
+    local titleDrag = false
+    local dragStartMouse, dragStartPos
     title.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true; dragStart = input.Position; startPos = main.Position
+            titleDrag = true
+            dragStartMouse = UserInputService:GetMouseLocation()
+            dragStartPos = main.Position
         end
     end)
-    UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local d = input.Position - dragStart
-            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if titleDrag and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local cur = UserInputService:GetMouseLocation()
+            local dx = cur.X - dragStartMouse.X
+            local dy = cur.Y - dragStartMouse.Y
+            main.Position = UDim2.new(
+                dragStartPos.X.Scale, dragStartPos.X.Offset + dx,
+                dragStartPos.Y.Scale, dragStartPos.Y.Offset + dy
+            )
         end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end))
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then titleDrag = false end
+    end))
+
+    -- minimize
+    local minimized = false
+    local fullSize = UDim2.new(0, 520, 0, 440)
+    local minSize  = UDim2.new(0, 520, 0, 32)
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        main.Size = minimized and minSize or fullSize
+        tabs.Visible = not minimized
+        content.Visible = not minimized
+        minBtn.Text = minimized and "□" or "–"
     end)
 
-    UserInputService.InputBegan:Connect(function(input, gp)
+    -- RightShift toggle
+    track(UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
-    end)
+    end))
 
     return sg
 end
 
-local ok, gui = pcall(buildGUI)
-if not ok then warn("[Camar] GUI failed:", gui) end
+local okGui, guiErr = pcall(buildGUI)
+if not okGui then warn("[Camar] GUI failed:", guiErr); print("[Camar] GUI failed:", guiErr) end
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- LOOPS
 -- ═════════════════════════════════════════════════════════════════════════════
 local lastMisc = 0
 
-RunService.RenderStepped:Connect(function()
+track(RunService.RenderStepped:Connect(function()
     local cam = workspace.CurrentCamera
     if not cam then return end
 
@@ -752,9 +835,9 @@ RunService.RenderStepped:Connect(function()
     updateWallhack()
     updateFly()
     applyNoclip()
-end)
+end))
 
-RunService.Heartbeat:Connect(function()
+track(RunService.Heartbeat:Connect(function()
     applyMovement()
     if Config.Misc.Fullbright then applyFullbright() end
     if tick() - lastMisc > 1 then
@@ -763,9 +846,9 @@ RunService.Heartbeat:Connect(function()
         autoReload()
         autoHeal()
     end
-end)
+end))
 
-UserInputService.InputBegan:Connect(function(input, gp)
+track(UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.Q and UserInputService:IsKeyDown(Enum.KeyCode.RightShift) then
         Config.Aimbot.Enabled   = false
@@ -773,10 +856,38 @@ UserInputService.InputBegan:Connect(function(input, gp)
         Config.Movement.Fly     = false
         Config.Movement.Noclip  = false
         Config.Combat.RapidFire = false
+        Config.Combat.NoRecoil  = false
+        Config.Combat.NoSpread  = false
+        Config.ESP.Wallhack     = false
         Config.Misc.Fullbright  = false
         applyFullbright()
         if flyBV then flyBV:Destroy(); flyBV = nil end
     end
-end)
+end))
 
-print("[Camar] loaded. RightShift = GUI · RightShift+Q = panic")
+-- ═════════════════════════════════════════════════════════════════════════════
+-- CLEANUP
+-- ═════════════════════════════════════════════════════════════════════════════
+getgenv().CAMAR_FPS_CLEANUP = function()
+    for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    for _, d in ipairs(drawingObjects) do pcall(function() d:Remove() end) end
+    for _, o in pairs(espObjects) do
+        pcall(function() o.box:Remove() end)
+        pcall(function() o.name:Remove() end)
+        pcall(function() o.health:Remove() end)
+        pcall(function() o.distance:Remove() end)
+        pcall(function() o.highlight:Destroy() end)
+    end
+    if flyBV then pcall(function() flyBV:Destroy() end) end
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local old = pg and pg:FindFirstChild("CamarFPS")
+        if old then old:Destroy() end
+    end)
+end
+
+print(string.format(
+    "[Camar] v4 loaded. Drawing=%s · Hooks=%s. RightShift=GUI · RightShift+Q=panic",
+    tostring(Drawing ~= nil),
+    tostring(hookmetamethod ~= nil and getnamecallmethod ~= nil)
+))
