@@ -761,32 +761,68 @@ local function buildGUI()
 
     selectTab("Aimbot")
 
-    -- window drag — title.Active = true garante captura
-    local titleDrag = false
-    local dragStartMouse, dragStartPos
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            titleDrag = true
-            dragStartMouse = UserInputService:GetMouseLocation()
-            dragStartPos = main.Position
-        end
-    end)
-    track(UserInputService.InputChanged:Connect(function(input)
-        if titleDrag and input.UserInputType == Enum.UserInputType.MouseMovement then
-            local cur = UserInputService:GetMouseLocation()
-            local dx = cur.X - dragStartMouse.X
-            local dy = cur.Y - dragStartMouse.Y
-            main.Position = UDim2.new(
-                dragStartPos.X.Scale, dragStartPos.X.Offset + dx,
-                dragStartPos.Y.Scale, dragStartPos.Y.Offset + dy
-            )
-        end
-    end))
-    track(UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then titleDrag = false end
-    end))
+  -- window drag — title.InputBegan + UIS.InputBegan fallback + polling
+local GuiService = game:GetService("GuiService")
+local guiInset = GuiService:GetGuiInset()
 
-    -- minimize
+local titleDrag = false
+local dragStartScreen, startPos
+
+local function beginDrag(screenPos)
+    titleDrag = true
+    dragStartScreen = screenPos
+    startPos = main.Position
+end
+
+local function endDrag()
+    titleDrag = false
+end
+
+-- via 1: InputBegan direto no title
+title.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        beginDrag(input.Position)
+    end
+end)
+
+-- via 2: fallback por hit-test em UIS.InputBegan
+local function isOverGui(gui)
+    local mp = UserInputService:GetMouseLocation()
+    local ap = gui.AbsolutePosition - guiInset
+    local sz = gui.AbsoluteSize
+    return mp.X >= ap.X and mp.X <= ap.X + sz.X
+       and mp.Y >= ap.Y and mp.Y <= ap.Y + sz.Y
+end
+
+track(UserInputService.InputBegan:Connect(function(input, processed)
+    if processed or titleDrag then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+       and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    if isOverGui(title) and not isOverGui(minBtn) and not isOverGui(close) then
+        beginDrag(input.Position)
+    end
+end))
+
+-- movimento por delta de input.Position (mesma space do InputBegan)
+track(UserInputService.InputChanged:Connect(function(input)
+    if not titleDrag then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+       and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    local delta = input.Position - dragStartScreen
+    main.Position = UDim2.new(
+        startPos.X.Scale, startPos.X.Offset + delta.X,
+        startPos.Y.Scale, startPos.Y.Offset + delta.Y
+    )
+end))
+
+track(UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+       or input.UserInputType == Enum.UserInputType.Touch then
+        endDrag()
+    end
+end))
+  
     local minimized = false
     local fullSize = UDim2.new(0, 520, 0, 440)
     local minSize  = UDim2.new(0, 520, 0, 32)
