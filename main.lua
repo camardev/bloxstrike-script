@@ -1,8 +1,7 @@
--- CAMAR UNIVERSAL FPS (v10)
+-- CAMAR UNIVERSAL FPS (v11)
 -- language: Luau | target: Roblox client via executor
--- v10: ESP section rewritten — per-frame visibility per sub-toggle, Chams
---      Highlight re-parented on char change, Team Color fallback, ESP errors
---      logged once per player, drawings persist across Enabled off.
+-- v11: NPC/bot tracking via workspace scan (0.5s cache), safe GUI parent
+--      via gethui/CoreGui, culling-tolerant target loop, aimbot covers bots.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -109,7 +108,60 @@ if fovCircle then
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- ESP (v10 — per-frame visibility, Chams re-parent, TeamColor fallback)
+-- TARGET COLLECTION (players + bots, 0.5s bot scan cache)
+-- ═════════════════════════════════════════════════════════════════════════════
+local cached_bots = {}
+local last_bot_scan = 0
+
+local function is_bot_model(model)
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    if Players:GetPlayerFromCharacter(model) then return false end
+    return model:FindFirstChild("HumanoidRootPart") ~= nil
+end
+
+local function get_cached_bots()
+    if tick() - last_bot_scan > 0.5 then
+        last_bot_scan = tick()
+        local fresh = {}
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") and is_bot_model(obj) then
+                fresh[#fresh+1] = obj
+            end
+        end
+        cached_bots = fresh
+    end
+    local alive = {}
+    for _, obj in ipairs(cached_bots) do
+        if obj.Parent and obj:FindFirstChild("HumanoidRootPart") then
+            local hum = obj:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                alive[#alive+1] = obj
+            end
+        end
+    end
+    return alive
+end
+
+local function collect_targets()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                list[#list+1] = { kind = "player", obj = plr, char = plr.Character, name = plr.Name }
+            end
+        end
+    end
+    for _, obj in ipairs(get_cached_bots()) do
+        local ok, name = pcall(function() return obj.Name end)
+        list[#list+1] = { kind = "bot", obj = obj, char = obj, name = ok and name or "NPC" }
+    end
+    return list
+end
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- ESP
 -- ═════════════════════════════════════════════════════════════════════════════
 local espObjects = {}
 
@@ -127,8 +179,8 @@ local function makeText(size)
     return t
 end
 
-local function createESP(plr)
-    if espObjects[plr] then return end
+local function createESP(key)
+    if espObjects[key] then return end
 
     local box = nil
     if HAS_SQUARE then box = tryDrawing("Square") end
@@ -151,7 +203,7 @@ local function createESP(plr)
     hl.FillColor           = ESP_COLOR
     hl.OutlineColor        = Color3.new(1, 1, 1)
 
-    espObjects[plr] = {
+    espObjects[key] = {
         box       = box,
         name      = makeText(14),
         health    = makeText(12),
@@ -160,14 +212,14 @@ local function createESP(plr)
     }
 end
 
-local function removeESP(plr)
-    local o = espObjects[plr]
+local function removeESP(key)
+    local o = espObjects[key]
     if not o then return end
     for _, d in ipairs({o.box, o.name, o.health, o.distance}) do
         if d then pcall(function() d:Remove() end) end
     end
     if o.highlight then pcall(function() o.highlight:Destroy() end) end
-    espObjects[plr] = nil
+    espObjects[key] = nil
 end
 
 local function hideOne(o)
@@ -178,15 +230,20 @@ local function hideOne(o)
     if o.highlight then o.highlight.Enabled = false end
 end
 
-local function updateESPForPlayer(plr, cam)
-    if not espObjects[plr] then createESP(plr) end
-    local o = espObjects[plr]
+local function updateESPForTarget(target, cam)
+    if not target.char or not target.char.Parent then
+        local o = espObjects[target.obj]
+        if o then hideOne(o) end
+        return
+    end
+    if not espObjects[target.obj] then createESP(target.obj) end
+    local o = espObjects[target.obj]
     if not o then return end
 
-    local char = plr.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    local head = char and char:FindFirstChild("Head")
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    local char = target.char
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    local hum  = char:FindFirstChildOfClass("Humanoid")
 
     if not (hrp and head and hum) or hum.Health <= 0 then
         hideOne(o)
@@ -194,8 +251,11 @@ local function updateESPForPlayer(plr, cam)
     end
 
     local baseColor = ESP_COLOR
-    if Config.ESP.TeamColor and plr.Team and plr.Team.TeamColor then
-        baseColor = plr.Team.TeamColor.Color
+    if Config.ESP.TeamColor and target.kind == "player" then
+        local team = target.obj.Team
+        if team and team.TeamColor then
+            baseColor = team.TeamColor.Color
+        end
     end
 
     if o.highlight then
@@ -232,7 +292,7 @@ local function updateESPForPlayer(plr, cam)
         o.box.Visible  = Config.ESP.Boxes == true
     end
     if o.name then
-        o.name.Text     = plr.Name
+        o.name.Text     = target.name
         o.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
         o.name.Color    = baseColor
         o.name.Visible  = Config.ESP.Names == true
@@ -250,30 +310,28 @@ local function updateESPForPlayer(plr, cam)
     end
 end
 
-local espErrorLogged = {}
 local function updateESP()
     local cam = workspace.CurrentCamera
     if not cam then return end
 
     if not Config.ESP.Enabled then
-        for _, o in pairs(espObjects) do
-            hideOne(o)
-        end
+        for _, o in pairs(espObjects) do hideOne(o) end
         return
     end
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer then
-            local ok, err = pcall(updateESPForPlayer, plr, cam)
-            if not ok and not espErrorLogged[plr] then
-                espErrorLogged[plr] = true
-                warn("[Camar] ESP error:", err)
-            end
+    local targets = collect_targets()
+    local seen = {}
+    for _, t in ipairs(targets) do
+        seen[t.obj] = true
+        local ok = pcall(updateESPForTarget, t, cam)
+        if not ok then
+            local o = espObjects[t.obj]
+            if o then hideOne(o) end
         end
     end
 
-    for plr in pairs(espObjects) do
-        if not plr.Parent then removeESP(plr) end
+    for obj in pairs(espObjects) do
+        if not seen[obj] then removeESP(obj) end
     end
 end
 
@@ -345,7 +403,7 @@ local function updateWallhack()
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- AIMBOT
+-- AIMBOT (covers players and bots)
 -- ═════════════════════════════════════════════════════════════════════════════
 local function keyHeld()
     local k = Config.Aimbot.Key
@@ -372,21 +430,23 @@ local function getAimTarget()
     if not cam then return nil end
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     local best, bestScore = nil, math.huge
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr == LocalPlayer then continue end
-        if Config.Aimbot.TeamCheck and plr.Team and LocalPlayer.Team and plr.Team == LocalPlayer.Team then continue end
-        local char = plr.Character
-        local head = char and char:FindFirstChild("Head")
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    for _, t in ipairs(collect_targets()) do
+        if t.kind == "player" and Config.Aimbot.TeamCheck
+           and t.obj.Team and LocalPlayer.Team and t.obj.Team == LocalPlayer.Team then
+            continue
+        end
+        if not t.char or not t.char.Parent then continue end
+        local head = t.char:FindFirstChild("Head")
+        local hum  = t.char:FindFirstChildOfClass("Humanoid")
         if not (head and hum and hum.Health > 0) then continue end
         local pos, onScreen = cam:WorldToViewportPoint(head.Position)
         if not onScreen or pos.Z < 0 then continue end
         local screenPos = Vector2.new(pos.X, pos.Y)
         local dist = (screenPos - center).Magnitude
         if dist > Config.Aimbot.FOV then continue end
-        if Config.Aimbot.WallCheck and not hasLOS(char, head.Position) then continue end
+        if Config.Aimbot.WallCheck and not hasLOS(t.char, head.Position) then continue end
         if dist < bestScore then
-            best, bestScore = {plr=plr, pos=head.Position, char=char}, dist
+            best, bestScore = { pos = head.Position, char = t.char }, dist
         end
     end
     return best
@@ -704,8 +764,17 @@ end
 -- ═════════════════════════════════════════════════════════════════════════════
 local uiRefreshFns = {}
 local function buildGUI()
-    local old = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("CamarFPS")
-    if old then old:Destroy() end
+    -- destrói instâncias antigas em qualquer container conhecido
+    for _, container in ipairs({
+        (gethui and select(2, pcall(gethui))) or nil,
+        (select(2, pcall(function() return game:GetService("CoreGui") end))) or nil,
+        LocalPlayer:FindFirstChild("PlayerGui"),
+    }) do
+        if container then
+            local old = container:FindFirstChild("CamarFPS")
+            if old then old:Destroy() end
+        end
+    end
 
     local sg = Instance.new("ScreenGui")
     sg.Name = "CamarFPS"
@@ -713,7 +782,20 @@ local function buildGUI()
     sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     sg.IgnoreGuiInset = false
     sg.DisplayOrder = 10
-    sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    local parent_gui
+    if gethui then
+        local ok, hui = pcall(gethui)
+        if ok and hui then parent_gui = hui end
+    end
+    if not parent_gui then
+        local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+        if ok and cg then parent_gui = cg end
+    end
+    if not parent_gui then
+        parent_gui = LocalPlayer:WaitForChild("PlayerGui")
+    end
+    sg.Parent = parent_gui
 
     local main = Instance.new("Frame")
     main.Size = UDim2.new(0, 540, 0, 460)
@@ -1274,7 +1356,7 @@ end))
 getgenv().CAMAR_FPS_CLEANUP = function()
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     for _, d in ipairs(drawingObjects) do pcall(function() d:Remove() end) end
-    for plr in pairs(espObjects) do removeESP(plr) end
+    for obj in pairs(espObjects) do removeESP(obj) end
     clearWallhack()
     if flyBV then pcall(function() flyBV:Destroy() end) end
     pcall(function()
@@ -1290,11 +1372,19 @@ getgenv().CAMAR_FPS_CLEANUP = function()
         removedEffects = {}
     end)
     pcall(function()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        local old = pg and pg:FindFirstChild("CamarFPS")
-        if old then old:Destroy() end
+        local containers = {
+            (gethui and select(2, pcall(gethui))) or nil,
+            (select(2, pcall(function() return game:GetService("CoreGui") end))) or nil,
+            LocalPlayer:FindFirstChild("PlayerGui"),
+        }
+        for _, c in ipairs(containers) do
+            if c then
+                local old = c:FindFirstChild("CamarFPS")
+                if old then old:Destroy() end
+            end
+        end
     end)
     getgenv().CAMAR_FPS_CLEANUP = nil
 end
 
-print("[Camar] v10 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
+print("[Camar] v11 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
