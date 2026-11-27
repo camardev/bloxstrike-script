@@ -1,8 +1,11 @@
--- CAMAR UNIVERSAL FPS (v12)
+-- CAMAR UNIVERSAL FPS (v12.1)
 -- language: Luau | target: Roblox client via executor
--- v12: player detection survives culling (_PVS_CulledCharacters), char
---      cache 1s, updateESPForTarget tolerant to nil Parent, Scan Players
---      debug button reports per-player state to console.
+-- v12.1: ESP alignment fix — find_character only accepts live workspace
+--        chars (no more culled/stale CFrame). is_bot_model requires Head +
+--        HRP + Humanoid + workspace. get_cached_bots re-validates parent.
+--        updateESPForTarget uses WorldToScreenPoint (Drawing coordinate
+--        space) and bails if char leaves workspace mid-frame. char_cache
+--        pruned periodically. Scan Players now reports workspace state.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -110,18 +113,38 @@ if fovCircle then
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- TARGET COLLECTION (players + bots, culled-safe)
+-- TARGET COLLECTION (v12.1 — strict workspace validation)
 -- ═════════════════════════════════════════════════════════════════════════════
 local cached_bots = {}
 local last_bot_scan = 0
 local char_cache  = {}
 local CHAR_CACHE_TTL = 1.0
 
+-- FIX: personagem só é válido se estiver de fato no workspace, com Head,
+-- HRP e Humanoid. Modelo culled em ReplicatedStorage/_PVS_CulledCharacters
+-- tem CFrame congelado e produz ESP em coordenada morta.
+local function is_live_char(char)
+    if not char or not char.Parent then return false end
+    if not char:IsDescendantOf(workspace) then return false end
+    if not char:FindFirstChild("Head") then return false end
+    if not char:FindFirstChild("HumanoidRootPart") then return false end
+    if not char:FindFirstChildOfClass("Humanoid") then return false end
+    return true
+end
+
+-- FIX: bot scan estrito. Exige Head + HRP + Humanoid + workspace.
+-- Dummy de treino no mapa ainda aparece (é bot legítimo), mas modelo
+-- decorativo com Humanoid não vira mais ESP fantasma.
 local function is_bot_model(model)
+    if not model or not model.Parent then return false end
+    if not model:IsDescendantOf(workspace) then return false end
+    if Players:GetPlayerFromCharacter(model) then return false end
     local hum = model:FindFirstChildOfClass("Humanoid")
     if not hum then return false end
-    if Players:GetPlayerFromCharacter(model) then return false end
-    return model:FindFirstChild("HumanoidRootPart") ~= nil
+    if hum.Health <= 0 then return false end
+    if not model:FindFirstChild("HumanoidRootPart") then return false end
+    if not model:FindFirstChild("Head") then return false end
+    return true
 end
 
 local function get_cached_bots()
@@ -137,9 +160,13 @@ local function get_cached_bots()
     end
     local alive = {}
     for _, obj in ipairs(cached_bots) do
-        if obj.Parent and obj:FindFirstChild("HumanoidRootPart") then
+        -- FIX: revalida workspace antes de cada uso. Modelo pode ter sido
+        -- destruído/culled entre scans.
+        if obj.Parent and obj:IsDescendantOf(workspace) then
             local hum = obj:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
+            local hrp = obj:FindFirstChild("HumanoidRootPart")
+            local head = obj:FindFirstChild("Head")
+            if hum and hum.Health > 0 and hrp and head then
                 alive[#alive+1] = obj
             end
         end
@@ -147,41 +174,42 @@ local function get_cached_bots()
     return alive
 end
 
--- busca robusta do character de um player (sobrevive a culling)
+-- FIX: find_character só retorna personagem vivo no workspace.
+-- Culled character (Parent existe mas não está em workspace) retorna nil
+-- em vez de virar ESP em coordenada congelada.
 local function find_character(plr)
-    if plr.Character and plr.Character.Parent then
-        return plr.Character
+    local char = plr.Character
+    if is_live_char(char) then
+        return char
     end
+
+    -- cache só vale se ainda estiver vivo no workspace
     local cached = char_cache[plr]
-    if cached and tick() - cached.time < CHAR_CACHE_TTL and cached.char and cached.char.Parent then
+    if cached and (tick() - cached.time) < CHAR_CACHE_TTL and is_live_char(cached.char) then
         return cached.char
     end
+    if cached then char_cache[plr] = nil end
 
-    local found = nil
-    -- workspace children por nome
+    -- procura no workspace por Model com nome do player
     for _, obj in ipairs(workspace:GetChildren()) do
-        if obj:IsA("Model") and obj.Name == plr.Name and obj:FindFirstChildOfClass("Humanoid") then
-            found = obj
-            break
-        end
-    end
-    -- containers de ReplicatedStorage (_PVS_CulledCharacters etc)
-    if not found then
-        for _, container in ipairs(ReplicatedStorage:GetChildren()) do
-            if container:IsA("Folder") or container:IsA("Model") then
-                local m = container:FindFirstChild(plr.Name)
-                if m and m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
-                    found = m
-                    break
-                end
-            end
+        if obj:IsA("Model") and obj.Name == plr.Name and is_live_char(obj) then
+            char_cache[plr] = { char = obj, time = tick() }
+            return obj
         end
     end
 
-    if found then
-        char_cache[plr] = { char = found, time = tick() }
+    return nil
+end
+
+local function prune_char_cache()
+    local now = tick()
+    for plr, entry in pairs(char_cache) do
+        if (now - entry.time) > CHAR_CACHE_TTL * 3
+           or not is_live_char(entry.char)
+           or not plr.Parent then
+            char_cache[plr] = nil
+        end
     end
-    return found
 end
 
 local function collect_targets()
@@ -274,8 +302,20 @@ local function hideOne(o)
     if o.highlight then o.highlight.Enabled = false end
 end
 
+-- FIX: WorldToScreenPoint retorna coordenada de TELA absoluta (inclui inset),
+-- que é o espaço do Drawing. WorldToViewportPoint retorna coordenada de
+-- viewport (sem inset) e desalinha no mobile/notch.
+local function world_to_screen(world_pos)
+    local cam = workspace.CurrentCamera
+    if not cam then return nil, nil end
+    local sp, on_screen = cam:WorldToScreenPoint(world_pos)
+    if not on_screen then return nil, sp.Z end
+    return Vector2.new(sp.X, sp.Y), sp.Z
+end
+
 local function updateESPForTarget(target, cam)
-    if not target.char then
+    -- FIX: bail se char sumiu do workspace entre coleta e desenho
+    if not target.char or not is_live_char(target.char) then
         local o = espObjects[target.obj]
         if o then hideOne(o) end
         return
@@ -287,7 +327,7 @@ local function updateESPForTarget(target, cam)
     local char = target.char
     local hum  = char:FindFirstChildOfClass("Humanoid")
 
-    if not hum or hum.Health <= 0 or not char.Parent then
+    if not hum or hum.Health <= 0 then
         hideOne(o)
         return
     end
@@ -301,7 +341,7 @@ local function updateESPForTarget(target, cam)
 
     -- highlight
     if o.highlight then
-        if Config.ESP.Chams and char.Parent then
+        if Config.ESP.Chams then
             if o.highlight.Parent ~= char then o.highlight.Parent = char end
             o.highlight.FillColor    = baseColor
             o.highlight.OutlineColor = Color3.new(1, 1, 1)
@@ -314,10 +354,9 @@ local function updateESPForTarget(target, cam)
     -- bounding box real do modelo (world space)
     local cf, size
     local ok, boxCf, boxSize = pcall(function() return char:GetBoundingBox() end)
-    if ok and boxCf and boxSize then
+    if ok and boxCf and boxSize and boxSize.Y > 0.5 and boxSize.Y < 100 then
         cf, size = boxCf, boxSize
     else
-        -- fallback: pivot + tamanho estimado
         local pivot = char:GetPivot()
         cf = pivot
         size = Vector3.new(4, 6, 4)
@@ -331,10 +370,10 @@ local function updateESPForTarget(target, cam)
     local top    = Vector3.new(center.X, topY, center.Z)
     local bottom = Vector3.new(center.X, botY, center.Z)
 
-    local topPos = cam:WorldToViewportPoint(top)
-    local botPos = cam:WorldToViewportPoint(bottom)
+    local topPos, topZ = world_to_screen(top)
+    local botPos, botZ = world_to_screen(bottom)
 
-    if topPos.Z <= 0 or botPos.Z <= 0 then
+    if not topPos or not botPos or (topZ and topZ <= 0) or (botZ and botZ <= 0) then
         hideOne(o)
         return
     end
@@ -342,11 +381,14 @@ local function updateESPForTarget(target, cam)
     local height = math.abs(topPos.Y - botPos.Y)
     if height < 2 then height = 2 end
 
-    -- projeta a largura no screen-space usando o offset em X do modelo
-    local rightW = cam:WorldToViewportPoint(Vector3.new(center.X + widthW / 2, center.Y, center.Z))
-    local leftW  = cam:WorldToViewportPoint(Vector3.new(center.X - widthW / 2, center.Y, center.Z))
-    local width  = math.abs(rightW.X - leftW.X)
-    if width < 1 then width = height * 0.55 end
+    -- projeta a largura no screen-space
+    local rightW, _ = world_to_screen(Vector3.new(center.X + widthW / 2, center.Y, center.Z))
+    local leftW,  _ = world_to_screen(Vector3.new(center.X - widthW / 2, center.Y, center.Z))
+    local width
+    if rightW and leftW then
+        width = math.abs(rightW.X - leftW.X)
+    end
+    if not width or width < 1 then width = height * 0.55 end
 
     if o.box then
         o.box.Size     = Vector2.new(width, height)
@@ -668,9 +710,9 @@ local function spectate(name)
     end
 end
 
--- diagnóstico do scan de players
+-- diagnóstico do scan de players (v12.1 — reporta workspace + projeção)
 local function scan_players()
-    print("=== CAMAR PLAYER SCAN ===")
+    print("=== CAMAR PLAYER SCAN v12.1 ===")
     print("Drawing: " .. tostring(Drawing ~= nil))
     print("LocalPlayer: " .. LocalPlayer.Name)
     for _, plr in ipairs(Players:GetPlayers()) do
@@ -678,29 +720,35 @@ local function scan_players()
             local char = find_character(plr)
             local line = "[Player] " .. plr.Name
             line = line .. " | plr.Character=" .. (plr.Character and "yes" or "NIL")
+            if plr.Character then
+                line = line .. " | inWorkspace=" .. tostring(plr.Character:IsDescendantOf(workspace))
+            end
             if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local hrp = char:FindFirstChild("HumanoidRootPart")
+                local hum  = char:FindFirstChildOfClass("Humanoid")
+                local hrp  = char:FindFirstChild("HumanoidRootPart")
                 local head = char:FindFirstChild("Head")
                 line = line .. " | char=" .. char.Name
-                line = line .. " | parent=" .. (char.Parent and char.Parent.Name or "NIL")
+                line = line .. " | inWorkspace=true"
                 line = line .. " | hum=" .. (hum and tostring(math.floor(hum.Health)) or "NIL")
                 line = line .. " | hrp=" .. (hrp and "yes" or "NIL")
                 line = line .. " | head=" .. (head and "yes" or "NIL")
                 if hrp and workspace.CurrentCamera then
-                    local pos, on = workspace.CurrentCamera:WorldToViewportPoint(hrp.Position)
-                    line = line .. string.format(" | pos=(%.0f,%.0f,%.0f) on=%s z=%.0f",
+                    local sp, on = workspace.CurrentCamera:WorldToScreenPoint(hrp.Position)
+                    local ws = workspace.CurrentCamera:WorldToViewportPoint(hrp.Position)
+                    line = line .. string.format(" | world=(%.0f,%.0f,%.0f) on=%s z=%.0f screen=(%.0f,%.0f) viewport=(%.0f,%.0f)",
                         hrp.Position.X, hrp.Position.Y, hrp.Position.Z,
-                        tostring(on), pos.Z)
+                        tostring(on), sp.Z,
+                        sp.X, sp.Y, ws.X, ws.Y)
                 end
             else
-                line = line .. " | char=NOT FOUND"
+                line = line .. " | char=NOT FOUND (culled/out of workspace)"
             end
             print(line)
         end
     end
-    print("Bots: " .. tostring(#cached_bots))
-    print("========================")
+    print("Bots (cached, live): " .. tostring(#get_cached_bots()))
+    print("Bots (raw cache): " .. tostring(#cached_bots))
+    print("================================")
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -1395,6 +1443,7 @@ end
 -- LOOPS
 -- ═════════════════════════════════════════════════════════════════════════════
 local lastMisc = 0
+local lastCachePrune = 0
 
 track(RunService.RenderStepped:Connect(function()
     local cam = workspace.CurrentCamera
@@ -1428,6 +1477,10 @@ track(RunService.Heartbeat:Connect(function()
         updateEffects()
         autoReload()
         autoHeal()
+    end
+    if tick() - lastCachePrune > 5 then
+        lastCachePrune = tick()
+        prune_char_cache()
     end
 end))
 
@@ -1469,6 +1522,8 @@ getgenv().CAMAR_FPS_CLEANUP = function()
         end
         removedEffects = {}
     end)
+    char_cache = {}
+    cached_bots = {}
     pcall(function()
         local containers = {
             (gethui and select(2, pcall(gethui))) or nil,
@@ -1485,4 +1540,4 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     getgenv().CAMAR_FPS_CLEANUP = nil
 end
 
-print("[Camar] v12 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized · Scan Players no Misc")
+print("[Camar] v12.1 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized · Scan Players no Misc (v12.1 report)")
