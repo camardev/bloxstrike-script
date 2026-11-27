@@ -1,14 +1,15 @@
--- CAMAR UNIVERSAL FPS (v4)
+-- CAMAR UNIVERSAL FPS (v5)
 -- language: Luau | target: Roblox client via executor
--- v4 fixes: window drag (title.Active), minimize button, slider MouseButton1Down+GetMouseLocation,
---           wallhack skips character parts, Hooks toggle honesto em runtime, AutoHeal via Tool:Activate,
---           local load -> loadBtn, cleanup on re-execute
+-- v5 fixes: ESP em pcall per-player, Drawing fallback, Visible setado por último,
+--           wallhack com skip-set de personagens, sem re-apply por frame, throttle 10s,
+--           window drag via hit-test puro, sliders robustos, diagnóstico de Drawing no boot
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
 local Lighting          = game:GetService("Lighting")
 local HttpService       = game:GetService("HttpService")
+local GuiService        = game:GetService("GuiService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -17,7 +18,7 @@ local hookmetamethod    = hookmetamethod
 local checkcaller       = checkcaller or function() return false end
 local getnamecallmethod = getnamecallmethod
 local writefile, readfile, isfile = writefile, readfile, isfile
-local Drawing           = Drawing or error("Drawing required (Synapse/Fluxus/Delta/Wave)")
+local Drawing           = Drawing or error("Drawing required")
 
 if getgenv().CAMAR_FPS_CLEANUP then pcall(getgenv().CAMAR_FPS_CLEANUP) end
 
@@ -65,48 +66,92 @@ loadConfig()
 -- ═════════════════════════════════════════════════════════════════════════════
 local connections, drawingObjects = {}, {}
 local function track(c) table.insert(connections, c); return c end
-local function trackDraw(d) table.insert(drawingObjects, d); return d end
+local function trackDraw(d) if d then table.insert(drawingObjects, d) end; return d end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- DRAWING
+-- DIAGNÓSTICO DRAWING
 -- ═════════════════════════════════════════════════════════════════════════════
-local fovCircle = trackDraw(Drawing.new("Circle"))
-fovCircle.Thickness = 1.5
-fovCircle.Filled    = false
-fovCircle.Color     = Color3.fromRGB(255, 90, 20)
-fovCircle.Visible   = false
+local function tryDrawing(kind)
+    local ok, d = pcall(function() return Drawing.new(kind) end)
+    if ok and d then return d end
+    return nil
+end
 
-local function newText(size)
-    local t = trackDraw(Drawing.new("Text"))
-    t.Size = size or 14
-    t.Center = true
-    t.Color = Color3.new(1, 1, 1)
-    t.Visible = false
-    pcall(function() t.Outline = true end)
-    return t
+do
+    local types = {"Line","Text","Image","Circle","Square","Quad","Triangle","Polygon"}
+    local out = {}
+    for _, t in ipairs(types) do
+        local d = tryDrawing(t)
+        out[t] = (d ~= nil)
+        if d then pcall(function() d:Remove() end) end
+    end
+    print("[Camar] Drawing types:", HttpService:JSONEncode(out))
+end
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- DRAWING (FOV)
+-- ═════════════════════════════════════════════════════════════════════════════
+local fovCircle = tryDrawing("Circle")
+if fovCircle then
+    trackDraw(fovCircle)
+    pcall(function() fovCircle.Thickness = 1.5 end)
+    pcall(function() fovCircle.Filled    = false end)
+    pcall(function() fovCircle.Color     = Color3.fromRGB(255, 90, 20) end)
+    pcall(function() fovCircle.Visible   = false end)
+    pcall(function() fovCircle.Position  = Vector2.new(-1000, -1000) end)
+    pcall(function() fovCircle.Radius    = 0 end)
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- ESP
 -- ═════════════════════════════════════════════════════════════════════════════
 local espObjects = {}
+local espWarned = false
+
+local function makeText(size)
+    local t = tryDrawing("Text")
+    if not t then return nil end
+    trackDraw(t)
+    pcall(function() t.Size    = size or 14 end)
+    pcall(function() t.Center  = true end)
+    pcall(function() t.Outline = true end)
+    pcall(function() t.Color   = Color3.new(1, 1, 1) end)
+    pcall(function() t.Visible = false end)
+    pcall(function() t.Position = Vector2.new(-1000, -1000) end)
+    return t
+end
 
 local function createESP(plr)
     if espObjects[plr] then return end
-    local ok, box = pcall(function() return trackDraw(Drawing.new("Square")) end)
-    if not ok or not box then return end
-    box.Thickness = 1
-    box.Filled    = false
-    box.Visible   = false
+    local box = tryDrawing("Square") or tryDrawing("Rectangle") or tryDrawing("Quad")
+    if not box then
+        if not espWarned then
+            espWarned = true
+            warn("[Camar] Drawing.new('Square'/'Rectangle'/'Quad') retornou nil — ESP desativado neste executor")
+        end
+        return
+    end
+    trackDraw(box)
+    pcall(function() box.Thickness = 1 end)
+    pcall(function() box.Filled    = false end)
+    pcall(function() box.Visible   = false end)
+    pcall(function() box.Position  = Vector2.new(-1000, -1000) end)
+    pcall(function() box.Size      = Vector2.new(1, 1) end)
 
     local hl = Instance.new("Highlight")
-    hl.Enabled = false
-    hl.FillTransparency    = 0.65
-    hl.OutlineTransparency = 0
-    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    pcall(function()
+        hl.Enabled              = false
+        hl.FillTransparency     = 0.65
+        hl.OutlineTransparency  = 0
+        hl.DepthMode            = Enum.HighlightDepthMode.AlwaysOnTop
+    end)
 
     espObjects[plr] = {
-        box = box, name = newText(14), health = newText(12), distance = newText(12), highlight = hl,
+        box = box,
+        name = makeText(14),
+        health = makeText(12),
+        distance = makeText(12),
+        highlight = hl,
     }
 end
 
@@ -114,10 +159,93 @@ local function removeESP(plr)
     local o = espObjects[plr]
     if not o then return end
     for _, d in ipairs({o.box, o.name, o.health, o.distance}) do
-        pcall(function() d:Remove() end)
+        if d then pcall(function() d:Remove() end) end
     end
-    pcall(function() o.highlight:Destroy() end)
+    if o.highlight then pcall(function() o.highlight:Destroy() end) end
     espObjects[plr] = nil
+end
+
+local function updateESPForPlayer(plr, cam)
+    if not espObjects[plr] then createESP(plr) end
+    local o = espObjects[plr]
+    if not o then return end
+
+    local char = plr.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    local head = char and char:FindFirstChild("Head")
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
+    if not (hrp and head and hum and hum.Health > 0) then
+        if o.box then pcall(function() o.box.Visible = false end) end
+        if o.name then pcall(function() o.name.Visible = false end) end
+        if o.health then pcall(function() o.health.Visible = false end) end
+        if o.distance then pcall(function() o.distance.Visible = false end) end
+        if o.highlight then pcall(function() o.highlight.Enabled = false end) end
+        return
+    end
+
+    local teamColor = plr.Team and plr.Team.TeamColor.Color or Config.ESP.BoxColor
+    local baseColor = Config.ESP.TeamColor and teamColor or Config.ESP.BoxColor
+
+    if o.highlight then
+        if Config.ESP.Chams then
+            if o.highlight.Parent ~= char then pcall(function() o.highlight.Parent = char end) end
+            pcall(function() o.highlight.Enabled      = true end)
+            pcall(function() o.highlight.FillColor    = baseColor end)
+            pcall(function() o.highlight.OutlineColor = Color3.new(1, 1, 1) end)
+        else
+            pcall(function() o.highlight.Enabled = false end)
+        end
+    end
+
+    local top    = head.Position + Vector3.new(0, 0.5, 0)
+    local bottom = hrp.Position  - Vector3.new(0, 2.6, 0)
+    local topPos, topOn = cam:WorldToViewportPoint(top)
+    local botPos, botOn = cam:WorldToViewportPoint(bottom)
+
+    if not (topOn and botOn) then
+        if o.box then pcall(function() o.box.Visible = false end) end
+        if o.name then pcall(function() o.name.Visible = false end) end
+        if o.health then pcall(function() o.health.Visible = false end) end
+        if o.distance then pcall(function() o.distance.Visible = false end) end
+        return
+    end
+
+    local height = math.abs(topPos.Y - botPos.Y)
+    local width  = height * 0.55
+    if height < 2 then height = 2; width = 1 end
+
+    if o.box then
+        pcall(function()
+            o.box.Size     = Vector2.new(width, height)
+            o.box.Position = Vector2.new(topPos.X - width / 2, topPos.Y)
+            o.box.Color    = baseColor
+            o.box.Visible  = Config.ESP.Boxes
+        end)
+    end
+    if o.name then
+        pcall(function()
+            o.name.Text     = plr.Name
+            o.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
+            o.name.Visible  = Config.ESP.Names
+        end)
+    end
+    if o.health then
+        pcall(function()
+            o.health.Text     = string.format("HP %d", math.floor(hum.Health))
+            o.health.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
+            o.health.Color    = Color3.fromRGB(60, 220, 60)
+            o.health.Visible  = Config.ESP.Health
+        end)
+    end
+    if o.distance then
+        pcall(function()
+            local dist = (cam.CFrame.Position - hrp.Position).Magnitude
+            o.distance.Text     = string.format("[%d]", math.floor(dist))
+            o.distance.Position = Vector2.new(topPos.X, topPos.Y + height + 16)
+            o.distance.Visible  = Config.ESP.Distance
+        end)
+    end
 end
 
 local function updateESP()
@@ -129,100 +257,84 @@ local function updateESP()
     if not cam then return end
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer then continue end
-        if not espObjects[plr] then createESP(plr) end
-        local o = espObjects[plr]
-        if not o or not o.box then continue end
-
-        local char = plr.Character
-        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-        local head = char and char:FindFirstChild("Head")
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
-
-        if not (hrp and head and hum and hum.Health > 0) then
-            o.box.Visible, o.name.Visible, o.health.Visible, o.distance.Visible = false, false, false, false
-            pcall(function() o.highlight.Enabled = false end)
-            continue
-        end
-
-        local teamColor = plr.Team and plr.Team.TeamColor.Color or Config.ESP.BoxColor
-        local baseColor = Config.ESP.TeamColor and teamColor or Config.ESP.BoxColor
-
-        if Config.ESP.Chams then
-            if o.highlight.Parent ~= char then pcall(function() o.highlight.Parent = char end) end
-            pcall(function() o.highlight.Enabled = true end)
-            pcall(function()
-                o.highlight.FillColor = baseColor
-                o.highlight.OutlineColor = Color3.new(1, 1, 1)
-            end)
-        else
-            pcall(function() o.highlight.Enabled = false end)
-        end
-
-        local top = head.Position + Vector3.new(0, 0.5, 0)
-        local bottom = hrp.Position - Vector3.new(0, 2.6, 0)
-        local topPos, topOn = cam:WorldToViewportPoint(top)
-        local botPos, botOn = cam:WorldToViewportPoint(bottom)
-
-        if not (topOn and botOn) then
-            o.box.Visible, o.name.Visible, o.health.Visible, o.distance.Visible = false, false, false, false
-            continue
-        end
-
-        local height = math.abs(topPos.Y - botPos.Y)
-        local width  = height * 0.55
-        o.box.Size     = Vector2.new(width, height)
-        o.box.Position = Vector2.new(topPos.X - width / 2, topPos.Y)
-        o.box.Color    = baseColor
-        o.box.Visible  = Config.ESP.Boxes
-
-        o.name.Text     = plr.Name
-        o.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
-        o.name.Visible  = Config.ESP.Names
-
-        o.health.Text     = string.format("HP %d", math.floor(hum.Health))
-        o.health.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
-        o.health.Color    = Color3.fromRGB(60, 220, 60)
-        o.health.Visible  = Config.ESP.Health
-
-        local dist = (cam.CFrame.Position - hrp.Position).Magnitude
-        o.distance.Text     = string.format("[%d]", math.floor(dist))
-        o.distance.Position = Vector2.new(topPos.X, topPos.Y + height + 16)
-        o.distance.Visible  = Config.ESP.Distance
+        pcall(updateESPForPlayer, plr, cam)
     end
-
     for plr in pairs(espObjects) do
         if not plr.Parent then removeESP(plr) end
     end
 end
 
--- wallhack — pula partes de personagem
-local wallhackParts, lastWallhack = {}, 0
-local function isCharPart(part)
-    local cur = part.Parent
-    for _ = 1, 6 do
-        if not cur then return false end
-        if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return true end
-        cur = cur.Parent
-    end
-    return false
-end
-local function updateWallhack()
-    if not Config.ESP.Wallhack then return end
-    if tick() - lastWallhack < 2 then
-        for part in pairs(wallhackParts) do
-            if part.Parent then pcall(function() part.LocalTransparencyModifier = 0.55 end)
-            else wallhackParts[part] = nil end
+-- ═════════════════════════════════════════════════════════════════════════════
+-- WALLHACK — skip set, throttle 10s, sem re-apply per frame
+-- ═════════════════════════════════════════════════════════════════════════════
+local wallhackParts = {}
+local lastWallhackScan = 0
+local wallhackWasOn = false
+
+local function clearWallhack()
+    for part in pairs(wallhackParts) do
+        if part and part.Parent then
+            pcall(function() part.LocalTransparencyModifier = 0 end)
         end
-        return
     end
-    lastWallhack = tick()
     wallhackParts = {}
+end
+
+local function rebuildWallhack()
+    -- limpar parts órfãs
+    for part in pairs(wallhackParts) do
+        if not part or not part.Parent then wallhackParts[part] = nil end
+    end
+
+    -- construir skip set de personagens dos jogadores
+    local skip = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local char = plr.Character
+        if char then
+            for _, d in ipairs(char:GetDescendants()) do
+                if d:IsA("BasePart") then skip[d] = true end
+            end
+        end
+    end
+    -- também pula personagens do workspace com Humanoid (NPCs, bots)
+    local function hasHumanoidAncestor(part)
+        local cur = part.Parent
+        for _ = 1, 8 do
+            if not cur or cur == workspace then break end
+            if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return true end
+            if cur:IsA("Accessory") or cur:IsA("Tool") then return true end
+            cur = cur.Parent
+        end
+        return false
+    end
+
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Transparency < 1 and not isCharPart(obj) then
+        if obj:IsA("BasePart") and obj.Transparency < 1
+           and not skip[obj]
+           and not hasHumanoidAncestor(obj)
+           and not wallhackParts[obj] then
             wallhackParts[obj] = true
             pcall(function() obj.LocalTransparencyModifier = 0.55 end)
         end
     end
+end
+
+local function updateWallhack()
+    local on = Config.ESP.Wallhack
+    if on ~= wallhackWasOn then
+        wallhackWasOn = on
+        if on then
+            rebuildWallhack()
+            lastWallhackScan = tick()
+        else
+            clearWallhack()
+        end
+        return
+    end
+    if not on then return end
+    if tick() - lastWallhackScan < 10 then return end
+    lastWallhackScan = tick()
+    rebuildWallhack()
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -389,7 +501,7 @@ local function spectate(name)
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- HOOKS — instala sempre (se disponível), checa toggle em runtime
+-- HOOKS
 -- ═════════════════════════════════════════════════════════════════════════════
 local RECOIL = { Recoil=true, CameraRecoil=true, RecoilCamera=true, Kickback=true }
 local SPREAD = { Spread=true, BulletSpread=true, Dispersion=true }
@@ -397,7 +509,6 @@ local SPREAD = { Spread=true, BulletSpread=true, Dispersion=true }
 local oldIndex, oldNamecall
 
 if hookmetamethod and getnamecallmethod then
-    -- __index
     local okIdx, resIdx = pcall(function()
         return hookmetamethod(game, "__index", function(self, key)
             if not checkcaller() and Config.Combat.Hooks then
@@ -420,14 +531,11 @@ if hookmetamethod and getnamecallmethod then
     end)
     if okIdx then oldIndex = resIdx end
 
-    -- __namecall
     local okNc, resNc = pcall(function()
         return hookmetamethod(game, "__namecall", function(self, ...)
             if not checkcaller() and Config.Combat.Hooks then
                 local method = getnamecallmethod()
-                if method == "Kick" and self == LocalPlayer then
-                    return nil
-                end
+                if method == "Kick" and self == LocalPlayer then return nil end
                 if method == "FireServer" and Config.Combat.RapidFire then
                     local okC, cls = pcall(function() return self.ClassName end)
                     if okC and cls == "RemoteEvent" then
@@ -469,7 +577,7 @@ local function buildGUI()
     main.Position = UDim2.new(0, 40, 0, 40)
     main.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
     main.BorderSizePixel = 0
-    main.Active = true
+    main.Active = false
     main.Parent = sg
     Instance.new("UICorner", main).CornerRadius = UDim.new(0, 6)
 
@@ -477,7 +585,7 @@ local function buildGUI()
     title.Size = UDim2.new(1, 0, 0, 32)
     title.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
     title.BorderSizePixel = 0
-    title.Active = true
+    title.Active = false
     title.Parent = main
     Instance.new("UICorner", title).CornerRadius = UDim.new(0, 6)
 
@@ -492,7 +600,6 @@ local function buildGUI()
     tText.TextSize = 14
     tText.Parent = title
 
-    -- minimize button
     local minBtn = Instance.new("TextButton")
     minBtn.Size = UDim2.new(0, 24, 0, 24)
     minBtn.Position = UDim2.new(1, -58, 0, 4)
@@ -505,7 +612,6 @@ local function buildGUI()
     minBtn.Parent = title
     Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
 
-    -- close button
     local close = Instance.new("TextButton")
     close.Size = UDim2.new(0, 24, 0, 24)
     close.Position = UDim2.new(1, -30, 0, 4)
@@ -659,7 +765,6 @@ local function buildGUI()
             fill.Size = UDim2.new(rel, 0, 1, 0)
             lbl.Text = label .. "  (" .. tostring(val) .. ")"
         end
-
         bar.MouseButton1Down:Connect(function()
             sliderDrag = true
             setFromMouse()
@@ -761,68 +866,51 @@ local function buildGUI()
 
     selectTab("Aimbot")
 
-  -- window drag — title.InputBegan + UIS.InputBegan fallback + polling
-local GuiService = game:GetService("GuiService")
-local guiInset = GuiService:GetGuiInset()
+    -- ── window drag — hit-test puro via UIS ─────────────────────────────────
+    local guiInset = GuiService:GetGuiInset()
+    local titleDrag = false
+    local dragStartScreen, startPos
 
-local titleDrag = false
-local dragStartScreen, startPos
-
-local function beginDrag(screenPos)
-    titleDrag = true
-    dragStartScreen = screenPos
-    startPos = main.Position
-end
-
-local function endDrag()
-    titleDrag = false
-end
-
--- via 1: InputBegan direto no title
-title.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-       or input.UserInputType == Enum.UserInputType.Touch then
-        beginDrag(input.Position)
+    local function isOverGui(gui)
+        if not gui.Visible then return false end
+        local mp = UserInputService:GetMouseLocation()
+        local ap = gui.AbsolutePosition - guiInset
+        local sz = gui.AbsoluteSize
+        return mp.X >= ap.X and mp.X <= ap.X + sz.X
+           and mp.Y >= ap.Y and mp.Y <= ap.Y + sz.Y
     end
-end)
 
--- via 2: fallback por hit-test em UIS.InputBegan
-local function isOverGui(gui)
-    local mp = UserInputService:GetMouseLocation()
-    local ap = gui.AbsolutePosition - guiInset
-    local sz = gui.AbsoluteSize
-    return mp.X >= ap.X and mp.X <= ap.X + sz.X
-       and mp.Y >= ap.Y and mp.Y <= ap.Y + sz.Y
-end
+    track(UserInputService.InputBegan:Connect(function(input)
+        if titleDrag then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+           and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        if not main.Visible then return end
+        if isOverGui(title) and not isOverGui(minBtn) and not isOverGui(close) then
+            titleDrag = true
+            dragStartScreen = input.Position
+            startPos = main.Position
+        end
+    end))
 
-track(UserInputService.InputBegan:Connect(function(input, processed)
-    if processed or titleDrag then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1
-       and input.UserInputType ~= Enum.UserInputType.Touch then return end
-    if isOverGui(title) and not isOverGui(minBtn) and not isOverGui(close) then
-        beginDrag(input.Position)
-    end
-end))
+    track(UserInputService.InputChanged:Connect(function(input)
+        if not titleDrag then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+           and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        local delta = input.Position - dragStartScreen
+        main.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end))
 
--- movimento por delta de input.Position (mesma space do InputBegan)
-track(UserInputService.InputChanged:Connect(function(input)
-    if not titleDrag then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseMovement
-       and input.UserInputType ~= Enum.UserInputType.Touch then return end
-    local delta = input.Position - dragStartScreen
-    main.Position = UDim2.new(
-        startPos.X.Scale, startPos.X.Offset + delta.X,
-        startPos.Y.Scale, startPos.Y.Offset + delta.Y
-    )
-end))
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            titleDrag = false
+        end
+    end))
 
-track(UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-       or input.UserInputType == Enum.UserInputType.Touch then
-        endDrag()
-    end
-end))
-  
+    -- ── minimizar ───────────────────────────────────────────────────────────
     local minimized = false
     local fullSize = UDim2.new(0, 520, 0, 440)
     local minSize  = UDim2.new(0, 520, 0, 32)
@@ -834,7 +922,7 @@ end))
         minBtn.Text = minimized and "□" or "–"
     end)
 
-    -- RightShift toggle
+    -- ── RightShift toggle ───────────────────────────────────────────────────
     track(UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
@@ -844,7 +932,7 @@ end))
 end
 
 local okGui, guiErr = pcall(buildGUI)
-if not okGui then warn("[Camar] GUI failed:", guiErr); print("[Camar] GUI failed:", guiErr) end
+if not okGui then warn("[Camar] GUI failed:", guiErr) end
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- LOOPS
@@ -863,18 +951,22 @@ track(RunService.RenderStepped:Connect(function()
         end
     end
 
-    fovCircle.Visible  = Config.Aimbot.Enabled and Config.Aimbot.ShowFOV
-    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    fovCircle.Radius   = Config.Aimbot.FOV
+    if fovCircle then
+        pcall(function()
+            fovCircle.Visible  = Config.Aimbot.Enabled and Config.Aimbot.ShowFOV
+            fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+            fovCircle.Radius   = Config.Aimbot.FOV
+        end)
+    end
 
     updateESP()
-    updateWallhack()
     updateFly()
     applyNoclip()
 end))
 
 track(RunService.Heartbeat:Connect(function()
     applyMovement()
+    updateWallhack()
     if Config.Misc.Fullbright then applyFullbright() end
     if tick() - lastMisc > 1 then
         lastMisc = tick()
@@ -908,12 +1000,13 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     for _, d in ipairs(drawingObjects) do pcall(function() d:Remove() end) end
     for _, o in pairs(espObjects) do
-        pcall(function() o.box:Remove() end)
-        pcall(function() o.name:Remove() end)
-        pcall(function() o.health:Remove() end)
-        pcall(function() o.distance:Remove() end)
-        pcall(function() o.highlight:Destroy() end)
+        if o.box then pcall(function() o.box:Remove() end) end
+        if o.name then pcall(function() o.name:Remove() end) end
+        if o.health then pcall(function() o.health:Remove() end) end
+        if o.distance then pcall(function() o.distance:Remove() end) end
+        if o.highlight then pcall(function() o.highlight:Destroy() end) end
     end
+    clearWallhack()
     if flyBV then pcall(function() flyBV:Destroy() end) end
     pcall(function()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -922,8 +1015,4 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     end)
 end
 
-print(string.format(
-    "[Camar] v4 loaded. Drawing=%s · Hooks=%s. RightShift=GUI · RightShift+Q=panic",
-    tostring(Drawing ~= nil),
-    tostring(hookmetamethod ~= nil and getnamecallmethod ~= nil)
-))
+print("[Camar] v5 loaded. RightShift=GUI · RightShift+Q=panic")
