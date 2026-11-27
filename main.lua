@@ -1,8 +1,8 @@
--- CAMAR UNIVERSAL FPS (v6)
+-- CAMAR UNIVERSAL FPS (v7)
 -- language: Luau | target: Roblox client via executor
--- v6 fixes: drag via RenderStepped polling (GetMouseLocation + IsMouseButtonPressed),
---           ball minimizada arrastável com emoji 🦐, RightShift toggle unificado,
---           Reset Position, hit-test sem filtro gp, ESP warn duplicado em print
+-- v7: drag via Mouse object legado (mouse.X/Y + Button1Up) + title.MouseButton1Down,
+--     ball 🦐 clicável (click restaura, drag move), RightShift com memória de estado,
+--     over(minBtn/close) bloqueia início de drag, Reset Position
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -576,13 +576,12 @@ local function buildGUI()
     sg.IgnoreGuiInset = false
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    -- ── main frame ──────────────────────────────────────────────────────────
     local main = Instance.new("Frame")
     main.Size = UDim2.new(0, 520, 0, 440)
     main.Position = UDim2.new(0, 40, 0, 40)
     main.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
     main.BorderSizePixel = 0
-    main.Active = false
+    main.Active = true
     main.Visible = true
     main.Parent = sg
     Instance.new("UICorner", main).CornerRadius = UDim.new(0, 6)
@@ -591,7 +590,7 @@ local function buildGUI()
     title.Size = UDim2.new(1, 0, 0, 32)
     title.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
     title.BorderSizePixel = 0
-    title.Active = false
+    title.Active = true
     title.Parent = main
     Instance.new("UICorner", title).CornerRadius = UDim.new(0, 6)
 
@@ -630,7 +629,7 @@ local function buildGUI()
     close.Parent = title
     Instance.new("UICorner", close).CornerRadius = UDim.new(0, 4)
 
-    -- ── ball de minimizado 🦐 ───────────────────────────────────────────────
+    -- ── ball 🦐 ─────────────────────────────────────────────────────────────
     local ball = Instance.new("TextButton")
     ball.Name = "CamarBall"
     ball.Size = UDim2.new(0, 56, 0, 56)
@@ -901,7 +900,7 @@ local function buildGUI()
 
     selectTab("Aimbot")
 
-    -- ── ball/minimize handlers ──────────────────────────────────────────────
+    -- ── ball handlers ───────────────────────────────────────────────────────
     local function showBall()
         ball.Position = UDim2.new(main.Position.X.Scale, main.Position.X.Offset,
                                   main.Position.Y.Scale, main.Position.Y.Offset)
@@ -919,82 +918,121 @@ local function buildGUI()
     minBtn.MouseButton1Click:Connect(showBall)
     close.MouseButton1Click:Connect(function() main.Visible = false end)
 
-    -- ── drag unificado por polling ──────────────────────────────────────────
+    -- ── mouse object legado ─────────────────────────────────────────────────
+    local mouse = LocalPlayer:GetMouse()
     local guiInset = GuiService:GetGuiInset()
 
-    local function hitTest(gui)
-        if not gui or not gui.Visible then return false end
+    local function getMouseXY()
+        if mouse then
+            local ok, mx = pcall(function() return mouse.X end)
+            local ok2, my = pcall(function() return mouse.Y end)
+            if ok and ok2 and type(mx) == "number" and type(my) == "number" then
+                return mx, my
+            end
+        end
         local mp = UserInputService:GetMouseLocation()
-        local ap = gui.AbsolutePosition - guiInset
-        local sz = gui.AbsoluteSize
-        return mp.X >= ap.X and mp.X <= ap.X + sz.X
-           and mp.Y >= ap.Y and mp.Y <= ap.Y + sz.Y
+        return mp.X, mp.Y
     end
 
-    local dragState = nil
+    local function overGui(g)
+        if not g or not g.Visible then return false end
+        local mx, my = getMouseXY()
+        local ap = g.AbsolutePosition - guiInset
+        local sz = g.AbsoluteSize
+        return mx >= ap.X and mx <= ap.X + sz.X
+           and my >= ap.Y and my <= ap.Y + sz.Y
+    end
 
-    track(UserInputService.InputBegan:Connect(function(input)
-        if dragState then return end
-        if input.UserInputType ~= Enum.UserInputType.MouseButton1
-           and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    -- ── drag state ──────────────────────────────────────────────────────────
+    local titleDragging = false
+    local titleStartX, titleStartY, titleStartPos
 
-        if main.Visible and hitTest(title)
-           and not hitTest(minBtn) and not hitTest(close) then
-            dragState = {
-                target = main,
-                startMouse = UserInputService:GetMouseLocation(),
-                startPos = main.Position,
-                moved = false,
-            }
-        elseif ball.Visible and hitTest(ball) then
-            dragState = {
-                target = ball,
-                startMouse = UserInputService:GetMouseLocation(),
-                startPos = ball.Position,
-                moved = false,
-            }
+    local ballDragging = false
+    local ballMoved = false
+    local ballStartX, ballStartY, ballStartPos
+
+    title.MouseButton1Down:Connect(function()
+        if overGui(minBtn) or overGui(close) then return end
+        titleDragging = true
+        titleStartX, titleStartY = getMouseXY()
+        titleStartPos = main.Position
+    end)
+
+    ball.MouseButton1Down:Connect(function()
+        ballDragging = true
+        ballMoved = false
+        ballStartX, ballStartY = getMouseXY()
+        ballStartPos = ball.Position
+    end)
+
+    local function endDrag()
+        if titleDragging then
+            titleDragging = false
         end
-    end))
-
-    track(RunService.RenderStepped:Connect(function()
-        if not dragState then return end
-
-        local pressed = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-                     or UserInputService:IsMouseButtonPressed(Enum.UserInputType.Touch)
-
-        if not pressed then
-            if not dragState.moved and dragState.target == ball then
+        if ballDragging then
+            ballDragging = false
+            if not ballMoved then
                 restoreFromBall()
             end
-            dragState = nil
-            return
         end
+    end
 
-        local mp = UserInputService:GetMouseLocation()
-        local dx = mp.X - dragState.startMouse.X
-        local dy = mp.Y - dragState.startMouse.Y
-
-        if math.abs(dx) > 3 or math.abs(dy) > 3 then
-            dragState.moved = true
-        end
-
-        if dragState.moved then
-            dragState.target.Position = UDim2.new(
-                dragState.startPos.X.Scale, dragState.startPos.X.Offset + dx,
-                dragState.startPos.Y.Scale, dragState.startPos.Y.Offset + dy
-            )
+    if mouse then
+        pcall(function() track(mouse.Button1Up:Connect(endDrag)) end)
+    end
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            endDrag()
         end
     end))
 
-    -- ── RightShift toggle unificado ─────────────────────────────────────────
+    -- ── polling de posição ──────────────────────────────────────────────────
+    track(RunService.RenderStepped:Connect(function()
+        if titleDragging then
+            local cx, cy = getMouseXY()
+            local dx = cx - titleStartX
+            local dy = cy - titleStartY
+            if dx ~= 0 or dy ~= 0 then
+                main.Position = UDim2.new(
+                    titleStartPos.X.Scale, titleStartPos.X.Offset + dx,
+                    titleStartPos.Y.Scale, titleStartPos.Y.Offset + dy
+                )
+            end
+        end
+        if ballDragging then
+            local cx, cy = getMouseXY()
+            local dx = cx - ballStartX
+            local dy = cy - ballStartY
+            if math.abs(dx) > 5 or math.abs(dy) > 5 then
+                ballMoved = true
+            end
+            if ballMoved then
+                ball.Position = UDim2.new(
+                    ballStartPos.X.Scale, ballStartPos.X.Offset + dx,
+                    ballStartPos.Y.Scale, ballStartPos.Y.Offset + dy
+                )
+            end
+        end
+    end))
+
+    -- ── RightShift toggle com memória ───────────────────────────────────────
+    local lastVisible = "main"
     track(UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.KeyCode == Enum.KeyCode.RightShift then
-            if main.Visible or ball.Visible then
+            if main.Visible then
+                lastVisible = "main"
                 main.Visible = false
+            elseif ball.Visible then
+                lastVisible = "ball"
                 ball.Visible = false
             else
-                main.Visible = true
+                if lastVisible == "ball" then
+                    ball.Visible = true
+                else
+                    main.Visible = true
+                end
             end
         end
     end))
@@ -1089,4 +1127,4 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     end)
 end
 
-print("[Camar] v6 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
+print("[Camar] v7 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
