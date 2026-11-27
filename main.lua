@@ -1,8 +1,8 @@
--- CAMAR UNIVERSAL FPS (v5)
+-- CAMAR UNIVERSAL FPS (v6)
 -- language: Luau | target: Roblox client via executor
--- v5 fixes: ESP em pcall per-player, Drawing fallback, Visible setado por último,
---           wallhack com skip-set de personagens, sem re-apply por frame, throttle 10s,
---           window drag via hit-test puro, sliders robustos, diagnóstico de Drawing no boot
+-- v6 fixes: drag via RenderStepped polling (GetMouseLocation + IsMouseButtonPressed),
+--           ball minimizada arrastável com emoji 🦐, RightShift toggle unificado,
+--           Reset Position, hit-test sem filtro gp, ESP warn duplicado em print
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -62,7 +62,7 @@ end
 loadConfig()
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- CLEANUP TRACKING
+-- CLEANUP
 -- ═════════════════════════════════════════════════════════════════════════════
 local connections, drawingObjects = {}, {}
 local function track(c) table.insert(connections, c); return c end
@@ -89,17 +89,17 @@ do
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- DRAWING (FOV)
+-- FOV CIRCLE
 -- ═════════════════════════════════════════════════════════════════════════════
 local fovCircle = tryDrawing("Circle")
 if fovCircle then
     trackDraw(fovCircle)
+    pcall(function() fovCircle.Position  = Vector2.new(0, 0) end)
+    pcall(function() fovCircle.Radius    = 0 end)
     pcall(function() fovCircle.Thickness = 1.5 end)
     pcall(function() fovCircle.Filled    = false end)
     pcall(function() fovCircle.Color     = Color3.fromRGB(255, 90, 20) end)
     pcall(function() fovCircle.Visible   = false end)
-    pcall(function() fovCircle.Position  = Vector2.new(-1000, -1000) end)
-    pcall(function() fovCircle.Radius    = 0 end)
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -107,27 +107,29 @@ end
 -- ═════════════════════════════════════════════════════════════════════════════
 local espObjects = {}
 local espWarned = false
+local espErrorShown = false
 
 local function makeText(size)
     local t = tryDrawing("Text")
     if not t then return nil end
     trackDraw(t)
-    pcall(function() t.Size    = size or 14 end)
-    pcall(function() t.Center  = true end)
-    pcall(function() t.Outline = true end)
-    pcall(function() t.Color   = Color3.new(1, 1, 1) end)
-    pcall(function() t.Visible = false end)
-    pcall(function() t.Position = Vector2.new(-1000, -1000) end)
+    pcall(function() t.Size     = size or 14 end)
+    pcall(function() t.Center   = true end)
+    pcall(function() t.Outline  = true end)
+    pcall(function() t.Color    = Color3.new(1, 1, 1) end)
+    pcall(function() t.Visible  = false end)
+    pcall(function() t.Position = Vector2.new(0, 0) end)
     return t
 end
 
 local function createESP(plr)
     if espObjects[plr] then return end
-    local box = tryDrawing("Square") or tryDrawing("Rectangle") or tryDrawing("Quad")
+    local box = tryDrawing("Square") or tryDrawing("Quad")
     if not box then
         if not espWarned then
             espWarned = true
-            warn("[Camar] Drawing.new('Square'/'Rectangle'/'Quad') retornou nil — ESP desativado neste executor")
+            local msg = "[Camar] Drawing.new('Square'/'Quad') retornou nil — ESP desativado neste executor"
+            warn(msg); print(msg)
         end
         return
     end
@@ -135,7 +137,7 @@ local function createESP(plr)
     pcall(function() box.Thickness = 1 end)
     pcall(function() box.Filled    = false end)
     pcall(function() box.Visible   = false end)
-    pcall(function() box.Position  = Vector2.new(-1000, -1000) end)
+    pcall(function() box.Position  = Vector2.new(0, 0) end)
     pcall(function() box.Size      = Vector2.new(1, 1) end)
 
     local hl = Instance.new("Highlight")
@@ -257,7 +259,11 @@ local function updateESP()
     if not cam then return end
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer then continue end
-        pcall(updateESPForPlayer, plr, cam)
+        local ok, err = pcall(updateESPForPlayer, plr, cam)
+        if not ok and not espErrorShown then
+            espErrorShown = true
+            print("[Camar] ESP error:", tostring(err))
+        end
     end
     for plr in pairs(espObjects) do
         if not plr.Parent then removeESP(plr) end
@@ -265,7 +271,7 @@ local function updateESP()
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- WALLHACK — skip set, throttle 10s, sem re-apply per frame
+-- WALLHACK
 -- ═════════════════════════════════════════════════════════════════════════════
 local wallhackParts = {}
 local lastWallhackScan = 0
@@ -281,12 +287,10 @@ local function clearWallhack()
 end
 
 local function rebuildWallhack()
-    -- limpar parts órfãs
     for part in pairs(wallhackParts) do
         if not part or not part.Parent then wallhackParts[part] = nil end
     end
 
-    -- construir skip set de personagens dos jogadores
     local skip = {}
     for _, plr in ipairs(Players:GetPlayers()) do
         local char = plr.Character
@@ -296,7 +300,7 @@ local function rebuildWallhack()
             end
         end
     end
-    -- também pula personagens do workspace com Humanoid (NPCs, bots)
+
     local function hasHumanoidAncestor(part)
         local cur = part.Parent
         for _ = 1, 8 do
@@ -572,12 +576,14 @@ local function buildGUI()
     sg.IgnoreGuiInset = false
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
+    -- ── main frame ──────────────────────────────────────────────────────────
     local main = Instance.new("Frame")
     main.Size = UDim2.new(0, 520, 0, 440)
     main.Position = UDim2.new(0, 40, 0, 40)
     main.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
     main.BorderSizePixel = 0
     main.Active = false
+    main.Visible = true
     main.Parent = sg
     Instance.new("UICorner", main).CornerRadius = UDim.new(0, 6)
 
@@ -623,8 +629,28 @@ local function buildGUI()
     close.BorderSizePixel = 0
     close.Parent = title
     Instance.new("UICorner", close).CornerRadius = UDim.new(0, 4)
-    close.MouseButton1Click:Connect(function() main.Visible = false end)
 
+    -- ── ball de minimizado 🦐 ───────────────────────────────────────────────
+    local ball = Instance.new("TextButton")
+    ball.Name = "CamarBall"
+    ball.Size = UDim2.new(0, 56, 0, 56)
+    ball.Position = UDim2.new(0, 40, 0, 40)
+    ball.BackgroundColor3 = Color3.fromRGB(255, 90, 20)
+    ball.Text = "🦐"
+    ball.TextSize = 30
+    ball.Font = Enum.Font.SourceSansBold
+    ball.TextColor3 = Color3.new(1, 1, 1)
+    ball.BorderSizePixel = 0
+    ball.AutoButtonColor = false
+    ball.Visible = false
+    ball.ZIndex = 10
+    ball.Parent = sg
+    Instance.new("UICorner", ball).CornerRadius = UDim.new(1, 0)
+    local ballStroke = Instance.new("UIStroke", ball)
+    ballStroke.Color = Color3.fromRGB(20, 20, 25)
+    ballStroke.Thickness = 2
+
+    -- ── tabs / content ──────────────────────────────────────────────────────
     local tabs = Instance.new("Frame")
     tabs.Size = UDim2.new(0, 110, 1, -32)
     tabs.Position = UDim2.new(0, 0, 0, 32)
@@ -864,15 +890,40 @@ local function buildGUI()
         applyFullbright()
     end)
 
+    local resetBtn = saveBtn:Clone()
+    resetBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 68)
+    resetBtn.Text = "Reset Position"
+    resetBtn.Parent = misc
+    resetBtn.MouseButton1Click:Connect(function()
+        main.Position = UDim2.new(0, 40, 0, 40)
+        ball.Position = UDim2.new(0, 40, 0, 40)
+    end)
+
     selectTab("Aimbot")
 
-    -- ── window drag — hit-test puro via UIS ─────────────────────────────────
-    local guiInset = GuiService:GetGuiInset()
-    local titleDrag = false
-    local dragStartScreen, startPos
+    -- ── ball/minimize handlers ──────────────────────────────────────────────
+    local function showBall()
+        ball.Position = UDim2.new(main.Position.X.Scale, main.Position.X.Offset,
+                                  main.Position.Y.Scale, main.Position.Y.Offset)
+        ball.Visible = true
+        main.Visible = false
+    end
 
-    local function isOverGui(gui)
-        if not gui.Visible then return false end
+    local function restoreFromBall()
+        main.Position = UDim2.new(ball.Position.X.Scale, ball.Position.X.Offset,
+                                  ball.Position.Y.Scale, ball.Position.Y.Offset)
+        main.Visible = true
+        ball.Visible = false
+    end
+
+    minBtn.MouseButton1Click:Connect(showBall)
+    close.MouseButton1Click:Connect(function() main.Visible = false end)
+
+    -- ── drag unificado por polling ──────────────────────────────────────────
+    local guiInset = GuiService:GetGuiInset()
+
+    local function hitTest(gui)
+        if not gui or not gui.Visible then return false end
         local mp = UserInputService:GetMouseLocation()
         local ap = gui.AbsolutePosition - guiInset
         local sz = gui.AbsoluteSize
@@ -880,59 +931,82 @@ local function buildGUI()
            and mp.Y >= ap.Y and mp.Y <= ap.Y + sz.Y
     end
 
+    local dragState = nil
+
     track(UserInputService.InputBegan:Connect(function(input)
-        if titleDrag then return end
+        if dragState then return end
         if input.UserInputType ~= Enum.UserInputType.MouseButton1
            and input.UserInputType ~= Enum.UserInputType.Touch then return end
-        if not main.Visible then return end
-        if isOverGui(title) and not isOverGui(minBtn) and not isOverGui(close) then
-            titleDrag = true
-            dragStartScreen = input.Position
-            startPos = main.Position
+
+        if main.Visible and hitTest(title)
+           and not hitTest(minBtn) and not hitTest(close) then
+            dragState = {
+                target = main,
+                startMouse = UserInputService:GetMouseLocation(),
+                startPos = main.Position,
+                moved = false,
+            }
+        elseif ball.Visible and hitTest(ball) then
+            dragState = {
+                target = ball,
+                startMouse = UserInputService:GetMouseLocation(),
+                startPos = ball.Position,
+                moved = false,
+            }
         end
     end))
 
-    track(UserInputService.InputChanged:Connect(function(input)
-        if not titleDrag then return end
-        if input.UserInputType ~= Enum.UserInputType.MouseMovement
-           and input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local delta = input.Position - dragStartScreen
-        main.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + delta.X,
-            startPos.Y.Scale, startPos.Y.Offset + delta.Y
-        )
-    end))
+    track(RunService.RenderStepped:Connect(function()
+        if not dragState then return end
 
-    track(UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-           or input.UserInputType == Enum.UserInputType.Touch then
-            titleDrag = false
+        local pressed = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+                     or UserInputService:IsMouseButtonPressed(Enum.UserInputType.Touch)
+
+        if not pressed then
+            if not dragState.moved and dragState.target == ball then
+                restoreFromBall()
+            end
+            dragState = nil
+            return
+        end
+
+        local mp = UserInputService:GetMouseLocation()
+        local dx = mp.X - dragState.startMouse.X
+        local dy = mp.Y - dragState.startMouse.Y
+
+        if math.abs(dx) > 3 or math.abs(dy) > 3 then
+            dragState.moved = true
+        end
+
+        if dragState.moved then
+            dragState.target.Position = UDim2.new(
+                dragState.startPos.X.Scale, dragState.startPos.X.Offset + dx,
+                dragState.startPos.Y.Scale, dragState.startPos.Y.Offset + dy
+            )
         end
     end))
 
-    -- ── minimizar ───────────────────────────────────────────────────────────
-    local minimized = false
-    local fullSize = UDim2.new(0, 520, 0, 440)
-    local minSize  = UDim2.new(0, 520, 0, 32)
-    minBtn.MouseButton1Click:Connect(function()
-        minimized = not minimized
-        main.Size = minimized and minSize or fullSize
-        tabs.Visible = not minimized
-        content.Visible = not minimized
-        minBtn.Text = minimized and "□" or "–"
-    end)
-
-    -- ── RightShift toggle ───────────────────────────────────────────────────
+    -- ── RightShift toggle unificado ─────────────────────────────────────────
     track(UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
-        if input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
+        if input.KeyCode == Enum.KeyCode.RightShift then
+            if main.Visible or ball.Visible then
+                main.Visible = false
+                ball.Visible = false
+            else
+                main.Visible = true
+            end
+        end
     end))
 
     return sg
 end
 
 local okGui, guiErr = pcall(buildGUI)
-if not okGui then warn("[Camar] GUI failed:", guiErr) end
+if not okGui then
+    warn("[Camar] GUI failed:", guiErr)
+    print("[Camar] GUI failed:", tostring(guiErr))
+end
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- LOOPS
@@ -1015,4 +1089,4 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     end)
 end
 
-print("[Camar] v5 loaded. RightShift=GUI · RightShift+Q=panic")
+print("[Camar] v6 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
