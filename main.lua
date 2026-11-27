@@ -1,8 +1,7 @@
--- CAMAR UNIVERSAL FPS (v8)
+-- CAMAR UNIVERSAL FPS (v9)
 -- language: Luau | target: Roblox client via executor
--- v8: input-driven drag (UIS only), click-vs-drag threshold, ESP never
---     blocked by missing Drawing type (Highlight + text always), intro
---     animation with 🦐, gradient UI, loadConfig refreshes toggles.
+-- v9: mouseXY subtracts GuiInset (fixes drag + ball restore), fullbright/
+--     effects/noclip now restore on toggle-off, everything else from v8.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -416,12 +415,28 @@ local function updateFly()
         flyBV:Destroy(); flyBV = nil
     end
 end
+local noclipState = {}
 local function applyNoclip()
-    if not Config.Movement.Noclip then return end
     local char = LocalPlayer.Character
-    if not char then return end
-    for _, p in ipairs(char:GetDescendants()) do
-        if p:IsA("BasePart") then pcall(function() p.CanCollide = false end) end
+    if Config.Movement.Noclip then
+        if not char then return end
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then
+                if noclipState[p] == nil then
+                    noclipState[p] = p.CanCollide
+                end
+                pcall(function() p.CanCollide = false end)
+            end
+        end
+    else
+        if next(noclipState) then
+            for p, orig in pairs(noclipState) do
+                if p and p.Parent then
+                    pcall(function() p.CanCollide = orig end)
+                end
+            end
+            noclipState = {}
+        end
     end
 end
 
@@ -443,13 +458,35 @@ local function applyFullbright()
         for k, v in pairs(lightingBackup) do pcall(function() Lighting[k] = v end) end
     end
 end
-local function removeEffects()
-    for _, obj in ipairs(Lighting:GetChildren()) do
-        if obj:IsA("PostEffect") or obj:IsA("Atmosphere") then
-            pcall(function() obj.Enabled = false end)
+local lastFullbrightState = nil
+local function updateFullbright()
+    if Config.Misc.Fullbright ~= lastFullbrightState then
+        lastFullbrightState = Config.Misc.Fullbright
+        applyFullbright()
+    end
+end
+
+local removedEffects = {}
+local function updateEffects()
+    if Config.Misc.RemoveEffects then
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if (obj:IsA("PostEffect") or obj:IsA("Atmosphere")) and obj.Enabled then
+                removedEffects[obj] = true
+                pcall(function() obj.Enabled = false end)
+            end
+        end
+    else
+        if next(removedEffects) then
+            for obj in pairs(removedEffects) do
+                if obj and obj.Parent then
+                    pcall(function() obj.Enabled = true end)
+                end
+            end
+            removedEffects = {}
         end
     end
 end
+
 local function autoReload()
     if not Config.Misc.AutoReload then return end
     local char = LocalPlayer.Character
@@ -1050,7 +1087,8 @@ local function buildGUI()
     smallBtn(misc, "Save Config", ESP_COLOR, 7, saveConfig)
     smallBtn(misc, "Load Config", nil, 8, function()
         loadConfig()
-        applyFullbright()
+        updateFullbright()
+        updateEffects()
         for _, fn in ipairs(uiRefreshFns) do pcall(fn) end
     end)
     smallBtn(misc, "Reset Position", nil, 9, function()
@@ -1085,7 +1123,8 @@ local function buildGUI()
 
     local function mouseXY()
         local p = UserInputService:GetMouseLocation()
-        return p.X, p.Y
+        local inset = GuiService:GetGuiInset()
+        return p.X - inset.X, p.Y - inset.Y
     end
 
     local function over(frame, x, y)
@@ -1207,10 +1246,10 @@ end))
 track(RunService.Heartbeat:Connect(function()
     applyMovement()
     updateWallhack()
-    if Config.Misc.Fullbright then applyFullbright() end
+    updateFullbright()
     if tick() - lastMisc > 1 then
         lastMisc = tick()
-        if Config.Misc.RemoveEffects then removeEffects() end
+        updateEffects()
         autoReload()
         autoHeal()
     end
@@ -1228,7 +1267,7 @@ track(UserInputService.InputBegan:Connect(function(input, gp)
         Config.Combat.NoSpread  = false
         Config.ESP.Wallhack     = false
         Config.Misc.Fullbright  = false
-        applyFullbright()
+        updateFullbright()
         if flyBV then flyBV:Destroy(); flyBV = nil end
     end
 end))
@@ -1243,6 +1282,18 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     clearWallhack()
     if flyBV then pcall(function() flyBV:Destroy() end) end
     pcall(function()
+        for p, orig in pairs(noclipState) do
+            if p and p.Parent then pcall(function() p.CanCollide = orig end) end
+        end
+        noclipState = {}
+    end)
+    pcall(function()
+        for obj in pairs(removedEffects) do
+            if obj and obj.Parent then pcall(function() obj.Enabled = true end) end
+        end
+        removedEffects = {}
+    end)
+    pcall(function()
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         local old = pg and pg:FindFirstChild("CamarFPS")
         if old then old:Destroy() end
@@ -1250,4 +1301,4 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     getgenv().CAMAR_FPS_CLEANUP = nil
 end
 
-print("[Camar] v8 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
+print("[Camar] v9 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
