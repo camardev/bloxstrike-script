@@ -1,7 +1,8 @@
--- CAMAR UNIVERSAL FPS (v9)
+-- CAMAR UNIVERSAL FPS (v10)
 -- language: Luau | target: Roblox client via executor
--- v9: mouseXY subtracts GuiInset (fixes drag + ball restore), fullbright/
---     effects/noclip now restore on toggle-off, everything else from v8.
+-- v10: ESP section rewritten — per-frame visibility per sub-toggle, Chams
+--      Highlight re-parented on char change, Team Color fallback, ESP errors
+--      logged once per player, drawings persist across Enabled off.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -72,7 +73,7 @@ local function track(c) table.insert(connections, c); return c end
 local function trackDraw(d) if d then table.insert(drawingObjects, d) end; return d end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- DRAWING PROBES (each probe cleans up after itself)
+-- DRAWING PROBES
 -- ═════════════════════════════════════════════════════════════════════════════
 local function probeDrawing(kind)
     if not Drawing then return false end
@@ -108,7 +109,7 @@ if fovCircle then
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- ESP
+-- ESP (v10 — per-frame visibility, Chams re-parent, TeamColor fallback)
 -- ═════════════════════════════════════════════════════════════════════════════
 local espObjects = {}
 
@@ -151,10 +152,10 @@ local function createESP(plr)
     hl.OutlineColor        = Color3.new(1, 1, 1)
 
     espObjects[plr] = {
-        box      = box,
-        name     = makeText(14),
-        health   = makeText(12),
-        distance = makeText(12),
+        box       = box,
+        name      = makeText(14),
+        health    = makeText(12),
+        distance  = makeText(12),
         highlight = hl,
     }
 end
@@ -170,9 +171,9 @@ local function removeESP(plr)
 end
 
 local function hideOne(o)
-    if o.box then o.box.Visible = false end
-    if o.name then o.name.Visible = false end
-    if o.health then o.health.Visible = false end
+    if o.box      then o.box.Visible      = false end
+    if o.name     then o.name.Visible     = false end
+    if o.health   then o.health.Visible   = false end
     if o.distance then o.distance.Visible = false end
     if o.highlight then o.highlight.Enabled = false end
 end
@@ -192,15 +193,19 @@ local function updateESPForPlayer(plr, cam)
         return
     end
 
-    local teamColor = plr.Team and plr.Team.TeamColor and plr.Team.TeamColor.Color
-    local baseColor = (Config.ESP.TeamColor and teamColor) or ESP_COLOR
+    local baseColor = ESP_COLOR
+    if Config.ESP.TeamColor and plr.Team and plr.Team.TeamColor then
+        baseColor = plr.Team.TeamColor.Color
+    end
 
     if o.highlight then
         if Config.ESP.Chams then
-            if o.highlight.Parent ~= char then o.highlight.Parent = char end
-            o.highlight.Enabled      = true
+            if o.highlight.Parent ~= char then
+                o.highlight.Parent = char
+            end
             o.highlight.FillColor    = baseColor
             o.highlight.OutlineColor = Color3.new(1, 1, 1)
+            o.highlight.Enabled      = true
         else
             o.highlight.Enabled = false
         end
@@ -208,10 +213,10 @@ local function updateESPForPlayer(plr, cam)
 
     local top    = head.Position + Vector3.new(0, 0.5, 0)
     local bottom = hrp.Position  - Vector3.new(0, 2.6, 0)
-    local topPos, topOn = cam:WorldToViewportPoint(top)
-    local botPos, botOn = cam:WorldToViewportPoint(bottom)
+    local topPos = cam:WorldToViewportPoint(top)
+    local botPos = cam:WorldToViewportPoint(bottom)
 
-    if not (topOn and botOn) or topPos.Z < 0 then
+    if topPos.Z <= 0 or botPos.Z <= 0 then
         hideOne(o)
         return
     end
@@ -224,45 +229,56 @@ local function updateESPForPlayer(plr, cam)
         o.box.Size     = Vector2.new(width, height)
         o.box.Position = Vector2.new(topPos.X - width / 2, topPos.Y)
         o.box.Color    = baseColor
-        o.box.Visible  = Config.ESP.Boxes
+        o.box.Visible  = Config.ESP.Boxes == true
     end
     if o.name then
         o.name.Text     = plr.Name
         o.name.Position = Vector2.new(topPos.X, topPos.Y - 18)
         o.name.Color    = baseColor
-        o.name.Visible  = Config.ESP.Names
+        o.name.Visible  = Config.ESP.Names == true
     end
     if o.health then
         o.health.Text     = string.format("HP %d", math.floor(hum.Health))
         o.health.Position = Vector2.new(topPos.X, topPos.Y + height + 2)
         o.health.Color    = Color3.fromRGB(60, 220, 60)
-        o.health.Visible  = Config.ESP.Health
+        o.health.Visible  = Config.ESP.Health == true
     end
     if o.distance then
         o.distance.Text     = string.format("[%d]", math.floor((cam.CFrame.Position - hrp.Position).Magnitude))
         o.distance.Position = Vector2.new(topPos.X, topPos.Y + height + 16)
-        o.distance.Visible  = Config.ESP.Distance
+        o.distance.Visible  = Config.ESP.Distance == true
     end
 end
 
+local espErrorLogged = {}
 local function updateESP()
-    if not Config.ESP.Enabled then
-        for p in pairs(espObjects) do removeESP(p) end
-        return
-    end
     local cam = workspace.CurrentCamera
     if not cam then return end
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr == LocalPlayer then continue end
-        pcall(updateESPForPlayer, plr, cam)
+
+    if not Config.ESP.Enabled then
+        for _, o in pairs(espObjects) do
+            hideOne(o)
+        end
+        return
     end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local ok, err = pcall(updateESPForPlayer, plr, cam)
+            if not ok and not espErrorLogged[plr] then
+                espErrorLogged[plr] = true
+                warn("[Camar] ESP error:", err)
+            end
+        end
+    end
+
     for plr in pairs(espObjects) do
         if not plr.Parent then removeESP(plr) end
     end
 end
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- WALLHACK (uses LocalTransparencyModifier, non-destructive on client)
+-- WALLHACK
 -- ═════════════════════════════════════════════════════════════════════════════
 local wallhackParts = {}
 local lastWallhackScan = 0
@@ -663,7 +679,6 @@ local function playIntro(screenGui)
     sub.ZIndex = 201
     sub.Parent = layer
 
-    -- shrimp pops up
     TweenService:Create(shrimp, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
         Position = UDim2.new(0.5, -45, 0.5, -115),
         Size = UDim2.new(0, 90, 0, 90),
@@ -700,7 +715,6 @@ local function buildGUI()
     sg.DisplayOrder = 10
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    -- main window
     local main = Instance.new("Frame")
     main.Size = UDim2.new(0, 540, 0, 460)
     main.Position = UDim2.new(0, 40, 0, 40)
@@ -713,7 +727,6 @@ local function buildGUI()
 
     local mainGrad = gradient(main, Color3.fromRGB(24, 24, 30), Color3.fromRGB(16, 16, 22), 90)
 
-    -- title bar (draggable)
     local title = Instance.new("Frame")
     title.Size = UDim2.new(1, 0, 0, 34)
     title.BackgroundColor3 = ESP_COLOR
@@ -723,7 +736,6 @@ local function buildGUI()
     corner(title, 8)
     local titleGrad = gradient(title, Color3.fromRGB(255, 110, 40), Color3.fromRGB(210, 70, 10), 90)
 
-    -- clip bottom corners only (visual refinement)
     local titleMask = Instance.new("Frame")
     titleMask.Size = UDim2.new(1, 0, 0, 4)
     titleMask.Position = UDim2.new(0, 0, 1, -4)
@@ -771,7 +783,6 @@ local function buildGUI()
     corner(close, 5)
     stroke(close, Color3.fromRGB(240, 80, 80), 1)
 
-    -- minimal ball 🦐
     local ball = Instance.new("TextButton")
     ball.Name = "CamarBall"
     ball.Size = UDim2.new(0, 56, 0, 56)
@@ -791,7 +802,6 @@ local function buildGUI()
     local ballStroke = stroke(ball, Color3.fromRGB(20, 20, 25), 2)
     gradient(ball, Color3.fromRGB(255, 120, 50), Color3.fromRGB(200, 60, 5), 135)
 
-    -- tabs column
     local tabs = Instance.new("Frame")
     tabs.Size = UDim2.new(0, 118, 1, -34)
     tabs.Position = UDim2.new(0, 0, 0, 34)
@@ -808,7 +818,6 @@ local function buildGUI()
     tp.PaddingRight = UDim.new(0, 8)
     tp.Parent = tabs
 
-    -- content
     local content = Instance.new("Frame")
     content.Size = UDim2.new(1, -118, 1, -34)
     content.Position = UDim2.new(0, 118, 0, 34)
@@ -865,7 +874,6 @@ local function buildGUI()
         return page
     end
 
-    -- toggle row
     local function makeToggle(parent, label, tbl, key, order)
         local row = Instance.new("Frame")
         row.Size = UDim2.new(1, -10, 0, 30)
@@ -921,7 +929,6 @@ local function buildGUI()
         end)
     end
 
-    -- slider row
     local function makeSlider(parent, label, tbl, key, mn, mx, isInt, order)
         local row = Instance.new("Frame")
         row.Size = UDim2.new(1, -10, 0, 44)
@@ -995,7 +1002,6 @@ local function buildGUI()
         end))
     end
 
-    -- build tabs
     local aim = newTab("Aimbot", 1)
     makeToggle(aim, "Enabled",    Config.Aimbot, "Enabled",   1)
     makeToggle(aim, "Wall Check", Config.Aimbot, "WallCheck", 2)
@@ -1098,9 +1104,6 @@ local function buildGUI()
 
     selectTab("Aimbot")
 
-    -- ═════════════════════════════════════════════════════════════════════════
-    -- SHOW / RESTORE
-    -- ═════════════════════════════════════════════════════════════════════════
     local function showBall()
         ball.Position = main.Position
         ball.Visible = true
@@ -1116,9 +1119,6 @@ local function buildGUI()
     minBtn.MouseButton1Click:Connect(showBall)
     close.MouseButton1Click:Connect(function() main.Visible = false end)
 
-    -- ═════════════════════════════════════════════════════════════════════════
-    -- DRAG (unified, UIS-only, hit-test by AbsolutePosition)
-    -- ═════════════════════════════════════════════════════════════════════════
     local drag = { mode = nil, startX = 0, startY = 0, startPos = nil, moved = false, threshold = 5 }
 
     local function mouseXY()
@@ -1180,9 +1180,6 @@ local function buildGUI()
         drag.moved = false
     end))
 
-    -- ═════════════════════════════════════════════════════════════════════════
-    -- RightShift toggle (state remembered)
-    -- ═════════════════════════════════════════════════════════════════════════
     local lastVisible = "main"
     track(UserInputService.InputBegan:Connect(function(input, gp)
         if gp then return end
@@ -1203,7 +1200,6 @@ local function buildGUI()
         end
     end))
 
-    -- intro flourish (runs on its own thread, doesn't block interaction)
     task.spawn(function() pcall(playIntro, sg) end)
 
     return sg
@@ -1301,4 +1297,4 @@ getgenv().CAMAR_FPS_CLEANUP = function()
     getgenv().CAMAR_FPS_CLEANUP = nil
 end
 
-print("[Camar] v9 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
+print("[Camar] v10 loaded. RightShift=GUI · RightShift+Q=panic · 🦐=minimized")
