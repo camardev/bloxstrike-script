@@ -285,28 +285,24 @@ local function updateESPForTarget(target, cam)
     if not o then return end
 
     local char = target.char
-    local hrp  = char:FindFirstChild("HumanoidRootPart")
-    local head = char:FindFirstChild("Head")
     local hum  = char:FindFirstChildOfClass("Humanoid")
 
-    if not (hrp and head and hum) or hum.Health <= 0 then
+    if not hum or hum.Health <= 0 or not char.Parent then
         hideOne(o)
         return
     end
 
+    -- baseColor
     local baseColor = ESP_COLOR
     if Config.ESP.TeamColor and target.kind == "player" then
         local team = target.obj.Team
-        if team and team.TeamColor then
-            baseColor = team.TeamColor.Color
-        end
+        if team and team.TeamColor then baseColor = team.TeamColor.Color end
     end
 
+    -- highlight
     if o.highlight then
         if Config.ESP.Chams and char.Parent then
-            if o.highlight.Parent ~= char then
-                o.highlight.Parent = char
-            end
+            if o.highlight.Parent ~= char then o.highlight.Parent = char end
             o.highlight.FillColor    = baseColor
             o.highlight.OutlineColor = Color3.new(1, 1, 1)
             o.highlight.Enabled      = true
@@ -315,8 +311,26 @@ local function updateESPForTarget(target, cam)
         end
     end
 
-    local top    = head.Position + Vector3.new(0, 0.5, 0)
-    local bottom = hrp.Position  - Vector3.new(0, 2.6, 0)
+    -- bounding box real do modelo (world space)
+    local cf, size
+    local ok, boxCf, boxSize = pcall(function() return char:GetBoundingBox() end)
+    if ok and boxCf and boxSize then
+        cf, size = boxCf, boxSize
+    else
+        -- fallback: pivot + tamanho estimado
+        local pivot = char:GetPivot()
+        cf = pivot
+        size = Vector3.new(4, 6, 4)
+    end
+
+    local center = cf.Position
+    local topY    = center.Y + size.Y / 2
+    local botY    = center.Y - size.Y / 2
+    local widthW  = math.max(size.X, size.Z)
+
+    local top    = Vector3.new(center.X, topY, center.Z)
+    local bottom = Vector3.new(center.X, botY, center.Z)
+
     local topPos = cam:WorldToViewportPoint(top)
     local botPos = cam:WorldToViewportPoint(bottom)
 
@@ -326,8 +340,13 @@ local function updateESPForTarget(target, cam)
     end
 
     local height = math.abs(topPos.Y - botPos.Y)
-    local width  = height * 0.55
-    if height < 2 then height = 2; width = 1 end
+    if height < 2 then height = 2 end
+
+    -- projeta a largura no screen-space usando o offset em X do modelo
+    local rightW = cam:WorldToViewportPoint(Vector3.new(center.X + widthW / 2, center.Y, center.Z))
+    local leftW  = cam:WorldToViewportPoint(Vector3.new(center.X - widthW / 2, center.Y, center.Z))
+    local width  = math.abs(rightW.X - leftW.X)
+    if width < 1 then width = height * 0.55 end
 
     if o.box then
         o.box.Size     = Vector2.new(width, height)
@@ -348,7 +367,7 @@ local function updateESPForTarget(target, cam)
         o.health.Visible  = Config.ESP.Health == true
     end
     if o.distance then
-        o.distance.Text     = string.format("[%d]", math.floor((cam.CFrame.Position - hrp.Position).Magnitude))
+        o.distance.Text     = string.format("[%d]", math.floor((cam.CFrame.Position - center).Magnitude))
         o.distance.Position = Vector2.new(topPos.X, topPos.Y + height + 16)
         o.distance.Visible  = Config.ESP.Distance == true
     end
